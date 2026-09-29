@@ -1,0 +1,201 @@
+@import "tailwindcss";
+
+/*
+  Horos design tokens.
+  Dark is the default. Light is opt-in via [data-theme="light"] (set by the
+  theme toggle, persisted per viewer in localStorage).
+*/
+:root {
+  color-scheme: dark;
+  --bg: #161c21; /* basalt */
+  --surface: #1d252b;
+  --surface-2: #242e35;
+  --line: #34414a;
+  --line-strong: #4a5963;
+  --ink: #e4e1d8; /* limestone */
+  --muted: #9aa6ad;
+  --accent: #7cc2a6; /* verdigris */
+  --accent-ink: #10231c;
+  --allow: #7cc2a6;
+  --cap: #cfa55b; /* bronze */
+  --hold: #93aecb;
+  --block: #e06a50; /* cinnabar */
+  --code-bg: #12171b;
+  --code-ink: #d6d9d4;
+  --code-muted: #7b8a92;
+  --code-string: #b7d99a;
+  --code-key: #93aecb;
+  --code-num: #cfa55b;
+  --code-kw: #d9a3c7;
+  /* decision colours on the always-dark code background */
+  --code-allow: #7cc2a6;
+  --code-cap: #cfa55b;
+  --code-hold: #93aecb;
+  --code-block: #e06a50;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #edefec; /* marble */
+  --surface: #f7f8f6;
+  --surface-2: #e2e6e2;
+  --line: #c5ccc8;
+  --line-strong: #97a39e;
+  --ink: #1a2126;
+  --muted: #4d5a63;
+  --accent: #2b7a5f;
+  --accent-ink: #f7f8f6;
+  --allow: #2b7a5f;
+  --cap: #8a6519;
+  --hold: #3c6187;
+  --block: #b0391f;
+  /* code stays dark in both themes: it reads as a terminal */
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-allow: var(--allow);
+  --color-cap: var(--cap);
+  --color-hold: var(--hold);
+  --color-block: var(--block);
+  --color-code-bg: var(--code-bg);
+  --color-code-ink: var(--code-ink);
+  --font-display: var(--font-spectral), Georgia, serif;
+  --font-sans: var(--font-plex-sans), system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "kern", "liga";
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* The limit line: the page's one recurring motif (a horos stone's incised line). */
+.limit-line {
+  height: 0;
+  border-top: 1px solid var(--line-strong);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--bg) 60%, transparent);
+}
+
+/* Code token colours (see components/Code.tsx) */
+.tok-c { color: var(--code-muted); font-style: italic; }
+.tok-s { color: var(--code-string); }
+.tok-k { color: var(--code-key); }
+.tok-n { color: var(--code-num); }
+.tok-w { color: var(--code-kw); }
+
+/* FAQ disclosure marker */
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details[open] .faq-mark { transform: rotate(45deg); }
+
+/* motion
+   Progressive enhancement: markup renders in its finished state. JS (Reveal.tsx)
+   writes data-visible="false" / data-motion="idle" after mount, then flips it when
+   the element scrolls in. Without JS, or with reduced motion, nothing is hidden. */
+.reveal {
+  transition:
+    opacity 700ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    transform 700ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition-delay: var(--reveal-delay, 0ms);
+}
+.reveal[data-visible="false"] {
+  opacity: 0;
+  transform: translateY(14px);
+}
+
+/* Line drawing for SVG paths with pathLength="1". Stagger with --draw-delay. */
+.draw {
+  stroke-dasharray: 1 1;
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset var(--draw-dur, 900ms) cubic-bezier(0.45, 0, 0.2, 1) var(--draw-delay, 0ms);
+}
+.draw-fade {
+  transition: opacity 450ms ease var(--draw-delay, 0ms);
+}
+[data-motion="idle"] .draw { stroke-dashoffset: 1; transition: none; }
+[data-motion="idle"] .draw-fade { opacity: 0; transition: none; }
+
+/* PipelineDiagram: token travels once, nodes light in order. */
+.pd-token {
+  opacity: 0;
+  transition: transform 1600ms linear;
+}
+[data-motion="idle"] .pd-token { transition: none; }
+[data-motion="play"] .pd-token { animation: pd-token-fade 1650ms linear both; }
+.pd-token-x { transform: translate(9px, 48px); }
+[data-motion="play"] .pd-token-x { transform: translate(924px, 48px); }
+.pd-token-y { top: 0; transition: top 1600ms linear; }
+[data-motion="idle"] .pd-token-y { transition: none; }
+[data-motion="play"] .pd-token-y { top: 100%; }
+.pd-rail {
+  transform-origin: top;
+  transition: transform 1600ms linear;
+}
+[data-motion="idle"] .pd-rail { transform: scaleY(0); transition: none; }
+.pd-dot { transition: background-color 250ms ease var(--draw-delay, 0ms); }
+[data-motion="idle"] .pd-dot { background-color: var(--line-strong); transition: none; }
+@keyframes pd-token-fade {
+  0% { opacity: 0; }
+  6%, 92% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* HeroFlow: the payment loop. Timing is driven from JS; CSS only eases between frames. */
+.hf-dim { transition: opacity 450ms ease; }
+.hf-hold-pulse { animation: hf-pulse 1100ms ease-in-out infinite; }
+@keyframes hf-row-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes hf-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  /* motion: always show the finished state */
+  .reveal[data-visible="false"] { opacity: 1; transform: none; }
+  [data-motion="idle"] .draw { stroke-dashoffset: 0; }
+  [data-motion="idle"] .draw-fade { opacity: 1; }
+  [data-motion="idle"] .pd-rail { transform: none; }
+  [data-motion="idle"] .pd-dot { background-color: var(--accent); }
+  .pd-token { display: none; }
+  .hf-hold-pulse { animation: none; }
+}
+
+/* Let grid children shrink below their content width (long code lines scroll inside <pre>). */
+.grid > * { min-width: 0; }

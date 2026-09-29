@@ -1,0 +1,42 @@
+{
+  "name": "@horos/worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "outbox, indexer, list-poll and watch worker",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "migrate": "./dist/migrate.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "start": "node dist/main.js",
+    "migrate": "node dist/migrate.js"
+  },
+  "dependencies": {
+    "@horos/adapters": "workspace:*",
+    "@horos/core": "workspace:*",
+    "@horos/pipeline": "workspace:*",
+    "@horos/schema": "workspace:*",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@types/pg": "8.23.1",
+    "drizzle-orm": "0.45.3",
+    "pg": "8.23.0",
+    "viem": "2.56.9"
+  }
+}

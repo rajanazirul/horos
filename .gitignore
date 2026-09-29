@@ -1,0 +1,25 @@
+node_modules/
+.next/
+out/
+build/
+coverage/
+*.tsbuildinfo
+.env*
+!.env.example
+.DS_Store
+.vercel
+npm-debug.log*
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+.playwright-mcp/
+# Monorepo
+.turbo/
+dist/
+
+# Public snapshot (tools/ops/publish-public.sh): these live in the private remote
+.claude/
+_bmad/
+_bmad-output/
+CLAUDE.local.md

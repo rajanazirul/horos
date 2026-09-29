@@ -1,0 +1,26 @@
+{
+  "name": "@horos/sdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "typed client, Check signing, deploy helper (placeholder)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@horos/schema": "workspace:*"
+  }
+}

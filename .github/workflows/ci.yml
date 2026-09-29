@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  node:
+    name: Lint, typecheck, test, build, boundary lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # Throwaway Postgres for the real-Postgres record-chain concurrency test (Story 2.5). The test
+      # creates and drops its own database. CI-only credentials; nothing secret.
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: horos-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      HOROS_TEST_DATABASE_URL: postgres://postgres:horos-ci@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0; pnpm version comes from package.json "packageManager"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Drizzle schema matches the committed migrations (no drift)
+        run: |
+          pnpm --filter @horos/adapters db:generate
+          git diff --exit-code packages/adapters/drizzle
+          test -z "$(git status --porcelain packages/adapters/drizzle)"
+
+      - name: Boundary lint (AD-1, AD-12)
+        run: pnpm boundary-lint
+
+      - name: Lint
+        run: pnpm turbo run lint
+
+      - name: Typecheck
+        run: pnpm turbo run typecheck
+
+      - name: Test (vitest)
+        run: pnpm turbo run test
+
+      - name: Build
+        run: pnpm turbo run build
+
+      - name: Landing static export exists
+        run: test -f apps/landing/out/index.html
+
+  contracts:
+    name: Foundry build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          submodules: true # forge-std and OpenZeppelin 5.6.1; nested submodules are not needed
+
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.8.3
+
+      - name: forge build
+        run: forge build --sizes
+
+      - name: forge test (everything except the invariant suite)
+        run: forge test -vvv --no-match-contract Invariant
+
+      - name: Only-Tighten invariant suite (Story 1.6)
+        run: forge test --match-contract Invariant -vv
+
+      - name: Test vectors match the committed file
+        run: git diff --exit-code test-vectors
+
+      # Story 2.6: the committed PolicyWallet ABI (packages/adapters) must match this build.
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0; pnpm version comes from package.json "packageManager"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install workspace
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+
+      - name: PolicyWallet ABI matches the committed file (no drift)
+        working-directory: .
+        run: |
+          pnpm --filter @horos/adapters abi:generate
+          git diff --exit-code packages/adapters/src/chain/policy-wallet-abi.ts
+
+  arc-fork:
+    name: Arc fork tests (arc-foundry)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: contracts
+    env:
+      ARC_FOUNDRY_URL: https://github.com/circlefin/arc-foundry/releases/download/v0.8.0-2/arc-foundry-v0.8.0-2-x86_64-unknown-linux-gnu.tar.gz
+      # Pinned here, not read from the release's .sha256 file: a swapped release asset must fail the job.
+      ARC_FOUNDRY_SHA256: 088bdb96a84418b757f9825d491e702792f1d1d1e29a9145af305a6600a79556
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          submodules: true # forge-std and OpenZeppelin 5.6.1; nested submodules are not needed
+
+      - name: Download arc-foundry v0.8.0-2
+        run: curl -sSfL --retry 3 -o arc-foundry.tar.gz "$ARC_FOUNDRY_URL"
+
+      - name: Verify the pinned sha256
+        run: echo "$ARC_FOUNDRY_SHA256  arc-foundry.tar.gz" | sha256sum -c -
+
+      - name: Extract arc-forge
+        run: tar -xzf arc-foundry.tar.gz forge && ./forge --version
+
+      - name: Fork tests and the fork invariant (Arc testnet)
+        run: ARC_FORK=true ./forge test --network arc --match-path 'test/fork/*' -vv

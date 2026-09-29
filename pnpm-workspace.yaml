@@ -1,0 +1,25 @@
+packages:
+  - "apps/*"
+  - "services/*"
+  - "packages/*"
+  - "tools/*"
+  - "contracts"
+
+# Dependency install scripts are denied unless listed here (least privilege).
+# unrs-resolver and esbuild (via drizzle-kit, dev only) ship prebuilt binaries via optional deps;
+# their postinstall scripts are not needed.
+allowBuilds:
+  esbuild: false
+  unrs-resolver: false
+
+# pnpm's default minimumReleaseAge would block these spine-pinned releases (AD Stack table).
+# Temporary: remove these entries once turbo 2.11.4 and vite 8.3.1 pass the release-age window (after 2026-10-10).
+minimumReleaseAgeExclude:
+  - "@turbo/darwin-64@2.11.4"
+  - "@turbo/darwin-arm64@2.11.4"
+  - "@turbo/linux-64@2.11.4"
+  - "@turbo/linux-arm64@2.11.4"
+  - "@turbo/windows-64@2.11.4"
+  - "@turbo/windows-arm64@2.11.4"
+  - "turbo@2.11.4"
+  - "vite@8.3.1"

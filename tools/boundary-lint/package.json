@@ -1,0 +1,16 @@
+{
+  "name": "@horos/boundary-lint",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dependency-boundary lint for the Horos workspace (AD-1, AD-12)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "horos-boundary-lint": "./src/cli.mjs"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint ."
+  }
+}

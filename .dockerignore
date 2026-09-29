@@ -1,0 +1,23 @@
+# Only what the api and worker images need. Secrets never enter the build context.
+**/node_modules
+**/dist
+**/.turbo
+**/.next
+**/out
+**/coverage
+**/*.tsbuildinfo
+**/.env*
+**/.DS_Store
+.git
+.github
+.claude
+.playwright-mcp
+_bmad
+_bmad-output
+docs
+apps/landing/*
+!apps/landing/package.json
+contracts/lib
+contracts/out
+contracts/cache
+contracts/broadcast

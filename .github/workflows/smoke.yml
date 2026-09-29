@@ -1,0 +1,81 @@
+name: Smoke (hosted api)
+
+# Manual only (Story 2.10): sends signed Checks to the hosted api with services/api/scripts/smoke-check.ts and fails
+# when any request fails, when any answer is advisory (the signature was not accepted), or when p95 exceeds
+# HOROS_SMOKE_P95_MAX_MS (default 500 ms). `hold` decisions are acceptable: every smoke Check is a first contact, so
+# once the wallet's New-Payee Cap (10 per Policy Period) is used, the answers are `hold`.
+#
+# The Checks go to a SEPARATE smoke PolicyWallet, onboarded and bound exactly like the Demo wallet
+# (docs/runbooks/railway-deploy.md, step 9), never to the public Demo wallet: smoke traffic must not land in the
+# public Demo Scope or use its New-Payee Cap.
+#
+# Secrets live in the GitHub Environment `smoke` (required reviewer: the founder), not in repository secrets, so the
+# smoke wallet's Payment key is released only to an approved run:
+#   HOROS_SMOKE_BASE_URL, HOROS_SMOKE_PAYMENT_KEY, HOROS_SMOKE_POLICY_WALLET (required);
+#   HOROS_SMOKE_CHAIN_ID, HOROS_SMOKE_P95_MAX_MS (optional).
+# Without the required ones, every step after the check is skipped and the run shows a "Smoke skipped" notice.
+on:
+  workflow_dispatch:
+    inputs:
+      checks:
+        description: Number of signed Checks to send (HOROS_SMOKE_N; empty means 5)
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Signed Checks against the hosted api
+    runs-on: ubuntu-latest
+    environment: smoke
+    timeout-minutes: 10
+    steps:
+      - id: check
+        name: Smoke secrets configured?
+        env:
+          BASE_URL: ${{ secrets.HOROS_SMOKE_BASE_URL }}
+          PAYMENT_KEY: ${{ secrets.HOROS_SMOKE_PAYMENT_KEY }}
+          POLICY_WALLET: ${{ secrets.HOROS_SMOKE_POLICY_WALLET }}
+        run: |
+          if [ -n "$BASE_URL" ] && [ -n "$PAYMENT_KEY" ] && [ -n "$POLICY_WALLET" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Smoke skipped::HOROS_SMOKE_BASE_URL, HOROS_SMOKE_PAYMENT_KEY and HOROS_SMOKE_POLICY_WALLET must all be set in the 'smoke' environment (see docs/runbooks/railway-deploy.md, step 9)."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.check.outputs.configured == 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - if: steps.check.outputs.configured == 'true'
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0; pnpm version comes from package.json "packageManager"
+
+      - if: steps.check.outputs.configured == 'true'
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - if: steps.check.outputs.configured == 'true'
+        run: pnpm install --frozen-lockfile --filter horos --filter "@horos/api..."
+
+      - if: steps.check.outputs.configured == 'true'
+        name: Build the wire schema the script imports
+        run: pnpm turbo run build --filter=@horos/schema
+
+      - if: steps.check.outputs.configured == 'true'
+        name: Smoke check
+        env:
+          HOROS_SMOKE_BASE_URL: ${{ secrets.HOROS_SMOKE_BASE_URL }}
+          HOROS_SMOKE_PAYMENT_KEY: ${{ secrets.HOROS_SMOKE_PAYMENT_KEY }}
+          HOROS_SMOKE_POLICY_WALLET: ${{ secrets.HOROS_SMOKE_POLICY_WALLET }}
+          HOROS_SMOKE_CHAIN_ID: ${{ secrets.HOROS_SMOKE_CHAIN_ID || '5042002' }}
+          HOROS_SMOKE_P95_MAX_MS: ${{ secrets.HOROS_SMOKE_P95_MAX_MS || '500' }}
+          HOROS_SMOKE_N: ${{ inputs.checks || '5' }}
+        run: node services/api/scripts/smoke-check.ts

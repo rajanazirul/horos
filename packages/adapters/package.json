@@ -1,0 +1,41 @@
+{
+  "name": "@horos/adapters",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Jev, Arc/viem, Circle, OFAC, Postgres adapters",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "drizzle"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "db:generate": "drizzle-kit generate",
+    "abi:generate": "node scripts/gen-abi.mjs"
+  },
+  "dependencies": {
+    "@circle-fin/developer-controlled-wallets": "10.8.1",
+    "@horos/core": "workspace:*",
+    "@horos/schema": "workspace:*",
+    "drizzle-orm": "0.45.3",
+    "pg": "8.23.0",
+    "viem": "2.56.9",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@horos/verify": "workspace:*",
+    "@types/pg": "8.23.1",
+    "drizzle-kit": "0.31.11"
+  }
+}

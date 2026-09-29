@@ -1,0 +1,38 @@
+{
+  "name": "@horos/api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "HTTP API service (Hono)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.1",
+    "@horos/adapters": "workspace:*",
+    "@horos/core": "workspace:*",
+    "@horos/pipeline": "workspace:*",
+    "@horos/schema": "workspace:*",
+    "hono": "4.13.9",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "drizzle-orm": "0.45.3",
+    "viem": "2.56.9"
+  }
+}

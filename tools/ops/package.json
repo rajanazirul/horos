@@ -1,0 +1,26 @@
+{
+  "name": "@horos/ops",
+  "version": "0.0.0",
+  "private": true,
+  "description": "backup, restore-drill and chain-verification scripts for the hosted database (Story 2.10)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@horos/adapters": "workspace:*",
+    "@horos/core": "workspace:*",
+    "@horos/schema": "workspace:*",
+    "@horos/verify": "workspace:*",
+    "drizzle-orm": "0.45.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@types/node": "24.13.6",
+    "typescript": "6.0.3",
+    "vitest": "5.0.1"
+  }
+}

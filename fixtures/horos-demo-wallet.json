@@ -1,0 +1,42 @@
+{
+  "chainId": 5042002,
+  "network": "arc-testnet",
+  "policyWallet": "0x7ed77bdd025d461e15d8e85dbf3ab0e9a286774c",
+  "usdc": "0x3600000000000000000000000000000000000000",
+  "deployTx": "0xc4fa38f4ba1668f5160f19870a08b0da60aede119046329f7bdabb7f67af9c26",
+  "deployBlock": 64052397,
+  "deployer": "0x137bb5333a33d0800a3e1af7db76eff1b69d307b",
+  "roles": {
+    "human": "0x3b60ebece31658efda2ad1cd28860cabbf2e4e85",
+    "payment": "0x705f7d75b1689c42034ca5102700be481edca2da",
+    "registrar": "0x7434fc9d31febe08082a710b255f3fe51b6a7ffc",
+    "model": "0x081b31405e48ec71bedbc22adf10ebcdcabb69a7",
+    "rules": "0x9542e0bbc0bcc0c88033233d7d70b0def37e2769"
+  },
+  "roleIsContract": false,
+  "policy": {
+    "firstContactCeiling": "500000000",
+    "walletPeriodCap": "5000000000",
+    "newPayeeCap": "10",
+    "policyPeriodDays": "30",
+    "unpinDelay": "86400"
+  },
+  "codehash": "0xe9205ccb203b20b18bd24d889d4fcfa589fa32bffa8e15df57590ca46944b0a7",
+  "build": {
+    "solc": "0.8.37",
+    "evmVersion": "osaka",
+    "optimizer": true,
+    "optimizerRuns": 200,
+    "source": "contracts/src/PolicyWallet.sol:PolicyWallet",
+    "gitCommit": "8fe95c436272d55bd6d39b4e0839193cc18f7fa6"
+  },
+  "explorerUrl": "https://explorer.testnet.arc.io/address/0x7ed77bdd025d461e15d8e85dbf3ab0e9a286774c",
+  "verified": true,
+  "verification": {
+    "sourcify": "exact_match",
+    "sourcifyUrl": "https://sourcify.dev/server/v2/contract/5042002/0x7ed77bdd025d461e15d8e85dbf3ab0e9a286774c",
+    "blockscout": "pending: Arc Blockscout offers solc up to 0.8.36; the contract is built with the pinned 0.8.37"
+  },
+  "circleContractsCheck": "fallback-logged: Foundry script deploy; Circle Contracts codehash check pending credentials (AD-15)",
+  "recordedAt": "2026-09-26T05:46:54.000Z"
+}

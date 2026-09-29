@@ -1,0 +1,51 @@
+{
+  "label": "Horos Demo List — fictional test addresses, not a real sanctions list",
+  "version": "1",
+  "notice": "Every name and address here is fictional and exists only to demonstrate Horos. Matches are recorded as simulated. This is not OFAC data and not a sanctions list.",
+  "derivation": "address = last 20 bytes of keccak256(utf8(\"horos-demo-list:\" + label)); no one holds the keys",
+  "entries": [
+    {
+      "label": "demo-2",
+      "address": "0x398edfeb6a0574f16f35f9b5353e5b398442acd9",
+      "entityNames": [
+        "DEMO MIXER SERVICE (FICTIONAL)"
+      ]
+    },
+    {
+      "label": "demo-6",
+      "address": "0x4ffabed761b86f7b8894654e80664c5f7023b905",
+      "entityNames": [
+        "DEMO FRONT COMPANY LLC (FICTIONAL)"
+      ]
+    },
+    {
+      "label": "demo-5",
+      "address": "0x505cc1f3e09cc0b2e7f7c91bc2d3be02c074372f",
+      "entityNames": [
+        "DEMO DARKNET MARKET (FICTIONAL)"
+      ]
+    },
+    {
+      "label": "demo-3",
+      "address": "0x6c99b106a1312e1990b44b7e45ebad9dc5899b3a",
+      "entityNames": [
+        "DEMO RANSOMWARE OPERATOR (FICTIONAL)",
+        "DEMO ALIAS: NIGHT LEDGER (FICTIONAL)"
+      ]
+    },
+    {
+      "label": "demo-1",
+      "address": "0x9e3c97778dd21ff2d32cb074059a862123e265e5",
+      "entityNames": [
+        "DEMO SANCTIONED EXCHANGE (FICTIONAL)"
+      ]
+    },
+    {
+      "label": "demo-4",
+      "address": "0xfdd3595deb3d82f41b43e9652ff5950421d250a3",
+      "entityNames": [
+        "DEMO SHELL TRADING CO. (FICTIONAL)"
+      ]
+    }
+  ]
+}

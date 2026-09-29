@@ -1,0 +1,55 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1790413978827,
+      "tag": "0000_policy_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1790418005991,
+      "tag": "0001_lists_and_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790419237641,
+      "tag": "0002_scopes_and_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790470445162,
+      "tag": "0003_accounts_and_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790476622375,
+      "tag": "0004_indexer_and_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790477664960,
+      "tag": "0005_read_api_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790605762704,
+      "tag": "0006_app_reads_migration_journal",
+      "breakpoints": true
+    }
+  ]
+}

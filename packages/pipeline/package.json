@@ -1,0 +1,33 @@
+{
+  "name": "@horos/pipeline",
+  "version": "0.0.0",
+  "private": true,
+  "description": "the single pipeline runner: sequences one Check through injected ports",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@horos/core": "workspace:*",
+    "@horos/schema": "workspace:*"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@horos/adapters": "workspace:*",
+    "drizzle-orm": "0.45.3",
+    "viem": "2.56.9"
+  }
+}

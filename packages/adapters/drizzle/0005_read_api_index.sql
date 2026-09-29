@@ -1,0 +1,1 @@
+CREATE INDEX "decision_record_scope_counterparty_seq_idx" ON "decision_record" USING btree ("scope",("record"->>'counterparty'),"seq");

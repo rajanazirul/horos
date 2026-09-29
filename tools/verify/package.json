@@ -1,0 +1,29 @@
+{
+  "name": "@horos/verify",
+  "version": "0.2.0",
+  "private": true,
+  "description": "published record-chain verifier (horos-verify)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "horos-verify": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@horos/schema": "workspace:*"
+  }
+}

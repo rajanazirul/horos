@@ -1,0 +1,33 @@
+{
+  "name": "@horos/schema",
+  "version": "0.0.0",
+  "private": true,
+  "description": "zod wire/domain types, EIP-712 types, canonical record hash",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./json-schema/horos.schema.json": "./json-schema/horos.schema.json"
+  },
+  "files": [
+    "dist",
+    "json-schema"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "generate:json-schema": "node scripts/generate-json-schema.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "viem": "2.56.9"
+  }
+}

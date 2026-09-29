@@ -1,0 +1,347 @@
+[
+  {
+    "name": "minimal-allow",
+    "record": {
+      "schemaVersion": 1,
+      "customerId": "01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f",
+      "policyVersionId": "01926f3a-7b2c-7e00-a000-000000000001",
+      "questionSetVersion": "v1",
+      "presetVersion": "standard-1",
+      "chainState": "live",
+      "id": "01926f3a-8000-7000-8000-000000000001",
+      "scope": "enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80",
+      "seq": 0,
+      "prevHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "createdAt": "2026-09-28T12:00:00.000Z",
+      "trigger": "check",
+      "policyWallet": "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+      "counterparty": "0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359",
+      "amount": "2500000",
+      "hardRules": [],
+      "signals": [],
+      "skippedQuestions": [],
+      "riskTier": "low",
+      "confidence": "1.0000",
+      "decision": "allow",
+      "reason": "Allowed: within the Counterparty's remaining limit under the standard Policy.",
+      "simulated": false,
+      "advisory": false
+    },
+    "canonical": "{\"advisory\":false,\"amount\":\"2500000\",\"chainState\":\"live\",\"confidence\":\"1.0000\",\"counterparty\":\"0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359\",\"createdAt\":\"2026-09-28T12:00:00.000Z\",\"customerId\":\"01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f\",\"decision\":\"allow\",\"hardRules\":[],\"id\":\"01926f3a-8000-7000-8000-000000000001\",\"policyVersionId\":\"01926f3a-7b2c-7e00-a000-000000000001\",\"policyWallet\":\"0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\",\"presetVersion\":\"standard-1\",\"prevHash\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"questionSetVersion\":\"v1\",\"reason\":\"Allowed: within the Counterparty's remaining limit under the standard Policy.\",\"riskTier\":\"low\",\"schemaVersion\":1,\"scope\":\"enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80\",\"seq\":0,\"signals\":[],\"simulated\":false,\"skippedQuestions\":[],\"trigger\":\"check\"}",
+    "hash": "0x9b0441f9d1f77a4310dd0d92c934dc16864d41b73e100d19a2a627ec7c3d0b2b"
+  },
+  {
+    "name": "cap-with-declared-identity",
+    "record": {
+      "schemaVersion": 1,
+      "customerId": "01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f",
+      "policyVersionId": "01926f3a-7b2c-7e00-a000-000000000001",
+      "questionSetVersion": "v1",
+      "presetVersion": "standard-1",
+      "chainState": "live",
+      "id": "01926f3a-8000-7000-8000-000000000002",
+      "scope": "enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80",
+      "seq": 1,
+      "prevHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "createdAt": "2026-09-28T12:00:01.250Z",
+      "trigger": "check",
+      "policyWallet": "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+      "counterparty": "0xdbf03b407c01e7cd3cbea99509d93f8dddc8c6fb",
+      "amount": "750000000",
+      "declaredIdentity": {
+        "status": "unverified",
+        "value": {
+          "name": "Acme Data Labs",
+          "domain": "acme.example",
+          "business_type": "data vendor",
+          "purpose": "API credits"
+        }
+      },
+      "hardRules": [
+        {
+          "rule": "ofac-sdn-exact-address",
+          "source": "ofac-sdn",
+          "snapshotId": "01926f3a-7000-7000-8000-00000000aaaa",
+          "snapshotHash": "0xabababababababababababababababababababababababababababababababab",
+          "matched": false
+        }
+      ],
+      "signals": [
+        {
+          "id": "no-history",
+          "value": true,
+          "tierContribution": "elevated"
+        },
+        {
+          "id": "payments-in-window",
+          "value": 0,
+          "tierContribution": "low"
+        }
+      ],
+      "skippedQuestions": [],
+      "riskTier": "elevated",
+      "confidence": "1.0000",
+      "decision": "cap",
+      "reason": "Capped: first contact is limited to 100 USDC for an elevated-risk Counterparty (unverified identity: Acme Data Labs).",
+      "limitBefore": "0",
+      "targetLimit": "100000000",
+      "simulated": false,
+      "advisory": false
+    },
+    "canonical": "{\"advisory\":false,\"amount\":\"750000000\",\"chainState\":\"live\",\"confidence\":\"1.0000\",\"counterparty\":\"0xdbf03b407c01e7cd3cbea99509d93f8dddc8c6fb\",\"createdAt\":\"2026-09-28T12:00:01.250Z\",\"customerId\":\"01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f\",\"decision\":\"cap\",\"declaredIdentity\":{\"status\":\"unverified\",\"value\":{\"business_type\":\"data vendor\",\"domain\":\"acme.example\",\"name\":\"Acme Data Labs\",\"purpose\":\"API credits\"}},\"hardRules\":[{\"matched\":false,\"rule\":\"ofac-sdn-exact-address\",\"snapshotHash\":\"0xabababababababababababababababababababababababababababababababab\",\"snapshotId\":\"01926f3a-7000-7000-8000-00000000aaaa\",\"source\":\"ofac-sdn\"}],\"id\":\"01926f3a-8000-7000-8000-000000000002\",\"limitBefore\":\"0\",\"policyVersionId\":\"01926f3a-7b2c-7e00-a000-000000000001\",\"policyWallet\":\"0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\",\"presetVersion\":\"standard-1\",\"prevHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"questionSetVersion\":\"v1\",\"reason\":\"Capped: first contact is limited to 100 USDC for an elevated-risk Counterparty (unverified identity: Acme Data Labs).\",\"riskTier\":\"elevated\",\"schemaVersion\":1,\"scope\":\"enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80\",\"seq\":1,\"signals\":[{\"id\":\"no-history\",\"tierContribution\":\"elevated\",\"value\":true},{\"id\":\"payments-in-window\",\"tierContribution\":\"low\",\"value\":0}],\"simulated\":false,\"skippedQuestions\":[],\"targetLimit\":\"100000000\",\"trigger\":\"check\"}",
+    "hash": "0x22a70bef6426f3adf93b21e280fbeb3327474e7cf0de793069604b0baf26f2d5"
+  },
+  {
+    "name": "block-demo-list-simulated",
+    "record": {
+      "schemaVersion": 1,
+      "customerId": "01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f",
+      "policyVersionId": "01926f3a-7b2c-7e00-a000-000000000001",
+      "questionSetVersion": "v1",
+      "presetVersion": "standard-1",
+      "chainState": "stale",
+      "id": "01926f3a-8000-7000-8000-000000000003",
+      "scope": "enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80",
+      "seq": 2,
+      "prevHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "createdAt": "2026-09-28T12:05:00.999Z",
+      "trigger": "watch-list-update",
+      "policyWallet": "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+      "counterparty": "0xd1220a0cf47c7b9be7a2e6ba89f429762e7b9adb",
+      "hardRules": [
+        {
+          "rule": "ofac-sdn-exact-address",
+          "source": "ofac-sdn",
+          "snapshotId": "01926f3a-7000-7000-8000-00000000aaaa",
+          "snapshotHash": "0xabababababababababababababababababababababababababababababababab",
+          "matched": false
+        },
+        {
+          "rule": "demo-list-exact-address",
+          "source": "horos-demo-list",
+          "snapshotId": "01926f3a-7000-7000-8000-00000000bbbb",
+          "snapshotHash": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "matched": true,
+          "entityNames": [
+            "HOROS DEMO ENTITY 1 (TEST DATA)"
+          ]
+        }
+      ],
+      "signals": [],
+      "skippedQuestions": [
+        "q-industry",
+        "q-near-miss-name"
+      ],
+      "riskTier": "severe",
+      "confidence": "1.0000",
+      "decision": "block",
+      "reason": "Blocked: address matches the Horos Demo List (simulated test data).",
+      "limitBefore": "100000000",
+      "targetLimit": "0",
+      "simulated": true,
+      "advisory": false
+    },
+    "canonical": "{\"advisory\":false,\"chainState\":\"stale\",\"confidence\":\"1.0000\",\"counterparty\":\"0xd1220a0cf47c7b9be7a2e6ba89f429762e7b9adb\",\"createdAt\":\"2026-09-28T12:05:00.999Z\",\"customerId\":\"01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f\",\"decision\":\"block\",\"hardRules\":[{\"matched\":false,\"rule\":\"ofac-sdn-exact-address\",\"snapshotHash\":\"0xabababababababababababababababababababababababababababababababab\",\"snapshotId\":\"01926f3a-7000-7000-8000-00000000aaaa\",\"source\":\"ofac-sdn\"},{\"entityNames\":[\"HOROS DEMO ENTITY 1 (TEST DATA)\"],\"matched\":true,\"rule\":\"demo-list-exact-address\",\"snapshotHash\":\"0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"snapshotId\":\"01926f3a-7000-7000-8000-00000000bbbb\",\"source\":\"horos-demo-list\"}],\"id\":\"01926f3a-8000-7000-8000-000000000003\",\"limitBefore\":\"100000000\",\"policyVersionId\":\"01926f3a-7b2c-7e00-a000-000000000001\",\"policyWallet\":\"0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\",\"presetVersion\":\"standard-1\",\"prevHash\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"questionSetVersion\":\"v1\",\"reason\":\"Blocked: address matches the Horos Demo List (simulated test data).\",\"riskTier\":\"severe\",\"schemaVersion\":1,\"scope\":\"enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80\",\"seq\":2,\"signals\":[],\"simulated\":true,\"skippedQuestions\":[\"q-industry\",\"q-near-miss-name\"],\"targetLimit\":\"0\",\"trigger\":\"watch-list-update\"}",
+    "hash": "0xf0b8ea412dd7e1f139469e9b9024618d8ed082d2a33b1e161fb16b795260472e"
+  },
+  {
+    "name": "advisory-hold-unicode-reason",
+    "record": {
+      "schemaVersion": 1,
+      "customerId": "01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f",
+      "policyVersionId": "01926f3a-7b2c-7e00-a000-000000000001",
+      "questionSetVersion": "v1",
+      "presetVersion": "standard-1",
+      "chainState": "live",
+      "id": "01926f3a-8000-7000-8000-000000000004",
+      "scope": "advisory-public",
+      "seq": 41,
+      "prevHash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+      "createdAt": "2026-09-28T23:59:59.001Z",
+      "trigger": "on-demand",
+      "counterparty": "0x52908400098527886e0f7030069857d2e4169ee7",
+      "amount": "1",
+      "hardRules": [],
+      "signals": [
+        {
+          "id": "new-address",
+          "value": "first-seen",
+          "tierContribution": "high"
+        }
+      ],
+      "skippedQuestions": [
+        "q-identity"
+      ],
+      "riskTier": "high",
+      "confidence": "0.6500",
+      "decision": "hold",
+      "reason": "Held: new address — review needed (“unverified”, café ✓, 支付, emoji 😀, tab\tand newline\n).",
+      "simulated": false,
+      "advisory": true
+    },
+    "canonical": "{\"advisory\":true,\"amount\":\"1\",\"chainState\":\"live\",\"confidence\":\"0.6500\",\"counterparty\":\"0x52908400098527886e0f7030069857d2e4169ee7\",\"createdAt\":\"2026-09-28T23:59:59.001Z\",\"customerId\":\"01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f\",\"decision\":\"hold\",\"hardRules\":[],\"id\":\"01926f3a-8000-7000-8000-000000000004\",\"policyVersionId\":\"01926f3a-7b2c-7e00-a000-000000000001\",\"presetVersion\":\"standard-1\",\"prevHash\":\"0x3333333333333333333333333333333333333333333333333333333333333333\",\"questionSetVersion\":\"v1\",\"reason\":\"Held: new address — review needed (“unverified”, café ✓, 支付, emoji 😀, tab\\tand newline\\n).\",\"riskTier\":\"high\",\"schemaVersion\":1,\"scope\":\"advisory-public\",\"seq\":41,\"signals\":[{\"id\":\"new-address\",\"tierContribution\":\"high\",\"value\":\"first-seen\"}],\"simulated\":false,\"skippedQuestions\":[\"q-identity\"],\"trigger\":\"on-demand\"}",
+    "hash": "0x9fc16c6c715b3c5b659e5976555e7867303b823bdad861c166390c377b7b93f5"
+  },
+  {
+    "name": "shadow-allow",
+    "record": {
+      "schemaVersion": 1,
+      "customerId": "01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f",
+      "policyVersionId": "01926f3a-7b2c-7e00-a000-000000000001",
+      "questionSetVersion": "v1",
+      "presetVersion": "standard-1",
+      "chainState": "live",
+      "id": "01926f3a-8000-7000-8000-000000000005",
+      "scope": "shadow:01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f",
+      "seq": 7,
+      "prevHash": "0x4444444444444444444444444444444444444444444444444444444444444444",
+      "createdAt": "2026-09-29T08:30:15.500Z",
+      "trigger": "check",
+      "policyWallet": "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+      "counterparty": "0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359",
+      "amount": "5000000",
+      "hardRules": [
+        {
+          "rule": "ofac-sdn-exact-address",
+          "source": "ofac-sdn",
+          "snapshotId": "01926f3a-7000-7000-8000-00000000aaaa",
+          "snapshotHash": "0xabababababababababababababababababababababababababababababababab",
+          "matched": false
+        }
+      ],
+      "signals": [
+        {
+          "id": "known-payee",
+          "value": true,
+          "tierContribution": "low"
+        }
+      ],
+      "skippedQuestions": [
+        "q-identity"
+      ],
+      "riskTier": "low",
+      "confidence": "1.0000",
+      "decision": "allow",
+      "reason": "Allowed (shadow): within the Counterparty's remaining limit under the standard Policy.",
+      "limitBefore": "100000000",
+      "targetLimit": "100000000",
+      "simulated": false,
+      "advisory": true
+    },
+    "canonical": "{\"advisory\":true,\"amount\":\"5000000\",\"chainState\":\"live\",\"confidence\":\"1.0000\",\"counterparty\":\"0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359\",\"createdAt\":\"2026-09-29T08:30:15.500Z\",\"customerId\":\"01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f\",\"decision\":\"allow\",\"hardRules\":[{\"matched\":false,\"rule\":\"ofac-sdn-exact-address\",\"snapshotHash\":\"0xabababababababababababababababababababababababababababababababab\",\"snapshotId\":\"01926f3a-7000-7000-8000-00000000aaaa\",\"source\":\"ofac-sdn\"}],\"id\":\"01926f3a-8000-7000-8000-000000000005\",\"limitBefore\":\"100000000\",\"policyVersionId\":\"01926f3a-7b2c-7e00-a000-000000000001\",\"policyWallet\":\"0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\",\"presetVersion\":\"standard-1\",\"prevHash\":\"0x4444444444444444444444444444444444444444444444444444444444444444\",\"questionSetVersion\":\"v1\",\"reason\":\"Allowed (shadow): within the Counterparty's remaining limit under the standard Policy.\",\"riskTier\":\"low\",\"schemaVersion\":1,\"scope\":\"shadow:01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f\",\"seq\":7,\"signals\":[{\"id\":\"known-payee\",\"tierContribution\":\"low\",\"value\":true}],\"simulated\":false,\"skippedQuestions\":[\"q-identity\"],\"targetLimit\":\"100000000\",\"trigger\":\"check\"}",
+    "hash": "0x575889f9cae08d65c5234d39fd103a31fe7084f048dbe7f0fb5a9bbd6439481c"
+  },
+  {
+    "name": "external-human-limit-set",
+    "record": {
+      "schemaVersion": 1,
+      "recordType": "external",
+      "scope": "enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80",
+      "customerId": "01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f",
+      "policyWallet": "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+      "reason": "Observed on-chain; Horos did not originate or evaluate this change.",
+      "simulated": false,
+      "advisory": false,
+      "id": "01926f3a-8000-7000-8000-000000000006",
+      "seq": 5,
+      "prevHash": "0x5555555555555555555555555555555555555555555555555555555555555555",
+      "createdAt": "2026-09-28T12:05:00.000Z",
+      "actor": "human",
+      "actorAddress": "0x2546bcd3c84621e976d8185a91a922ae77ecec30",
+      "txHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "blockNumber": 1204,
+      "blockTimestamp": "2026-09-28T12:04:58.000Z",
+      "carriedHash": "0x7777777777777777777777777777777777777777777777777777777777777777",
+      "events": [
+        {
+          "logIndex": 0,
+          "name": "LimitSet",
+          "args": {
+            "counterparty": "0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359",
+            "oldLimit": "0",
+            "newLimit": "300000000",
+            "humanEpoch": "1",
+            "recordHash": "0x7777777777777777777777777777777777777777777777777777777777777777"
+          }
+        }
+      ],
+      "counterparty": "0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359"
+    },
+    "canonical": "{\"actor\":\"human\",\"actorAddress\":\"0x2546bcd3c84621e976d8185a91a922ae77ecec30\",\"advisory\":false,\"blockNumber\":1204,\"blockTimestamp\":\"2026-09-28T12:04:58.000Z\",\"carriedHash\":\"0x7777777777777777777777777777777777777777777777777777777777777777\",\"counterparty\":\"0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359\",\"createdAt\":\"2026-09-28T12:05:00.000Z\",\"customerId\":\"01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f\",\"events\":[{\"args\":{\"counterparty\":\"0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359\",\"humanEpoch\":\"1\",\"newLimit\":\"300000000\",\"oldLimit\":\"0\",\"recordHash\":\"0x7777777777777777777777777777777777777777777777777777777777777777\"},\"logIndex\":0,\"name\":\"LimitSet\"}],\"id\":\"01926f3a-8000-7000-8000-000000000006\",\"policyWallet\":\"0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\",\"prevHash\":\"0x5555555555555555555555555555555555555555555555555555555555555555\",\"reason\":\"Observed on-chain; Horos did not originate or evaluate this change.\",\"recordType\":\"external\",\"schemaVersion\":1,\"scope\":\"enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80\",\"seq\":5,\"simulated\":false,\"txHash\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+    "hash": "0x7f30c365e2d9eeab19223d09b96e5c827b1539bed0380a55b28b032e78dcf8d2"
+  },
+  {
+    "name": "external-policy-changed",
+    "record": {
+      "schemaVersion": 1,
+      "recordType": "external",
+      "scope": "enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80",
+      "customerId": "01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f",
+      "policyWallet": "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+      "reason": "Observed on-chain; Horos did not originate or evaluate this change.",
+      "simulated": false,
+      "advisory": false,
+      "id": "01926f3a-8000-7000-8000-000000000007",
+      "seq": 6,
+      "prevHash": "0x6666666666666666666666666666666666666666666666666666666666666666",
+      "createdAt": "2026-09-28T12:06:00.000Z",
+      "actor": "human",
+      "actorAddress": "0x2546bcd3c84621e976d8185a91a922ae77ecec30",
+      "txHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "blockNumber": 1210,
+      "blockTimestamp": "2026-09-28T12:05:59.000Z",
+      "carriedHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "events": [
+        {
+          "logIndex": 2,
+          "name": "PolicyChanged",
+          "args": {
+            "field": "0",
+            "oldValue": "500000000",
+            "newValue": "250000000",
+            "recordHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        }
+      ]
+    },
+    "canonical": "{\"actor\":\"human\",\"actorAddress\":\"0x2546bcd3c84621e976d8185a91a922ae77ecec30\",\"advisory\":false,\"blockNumber\":1210,\"blockTimestamp\":\"2026-09-28T12:05:59.000Z\",\"carriedHash\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"createdAt\":\"2026-09-28T12:06:00.000Z\",\"customerId\":\"01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f\",\"events\":[{\"args\":{\"field\":\"0\",\"newValue\":\"250000000\",\"oldValue\":\"500000000\",\"recordHash\":\"0x0000000000000000000000000000000000000000000000000000000000000000\"},\"logIndex\":2,\"name\":\"PolicyChanged\"}],\"id\":\"01926f3a-8000-7000-8000-000000000007\",\"policyWallet\":\"0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\",\"prevHash\":\"0x6666666666666666666666666666666666666666666666666666666666666666\",\"reason\":\"Observed on-chain; Horos did not originate or evaluate this change.\",\"recordType\":\"external\",\"schemaVersion\":1,\"scope\":\"enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80\",\"seq\":6,\"simulated\":false,\"txHash\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+    "hash": "0x938fd84baecb7a6f7a8213c786c7967c50176bb09cce46a5f126bcf176f68cc5"
+  },
+  {
+    "name": "external-unrecognised-registrar",
+    "record": {
+      "schemaVersion": 1,
+      "recordType": "external",
+      "scope": "enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80",
+      "customerId": "01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f",
+      "policyWallet": "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+      "reason": "Observed on-chain; Horos did not originate or evaluate this change.",
+      "simulated": false,
+      "advisory": false,
+      "id": "01926f3a-8000-7000-8000-000000000008",
+      "seq": 7,
+      "prevHash": "0x8888888888888888888888888888888888888888888888888888888888888888",
+      "createdAt": "2026-09-28T12:07:00.000Z",
+      "actor": "registrar",
+      "actorAddress": "0x7434fc9d31febe08082a710b255f3fe51b6a7ffc",
+      "txHash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "blockNumber": 1215,
+      "blockTimestamp": "2026-09-28T12:06:59.000Z",
+      "carriedHash": "0x9999999999999999999999999999999999999999999999999999999999999999",
+      "events": [
+        {
+          "logIndex": 1,
+          "name": "CounterpartyRegistered",
+          "args": {
+            "counterparty": "0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359",
+            "limit": "100000000",
+            "recordHash": "0x9999999999999999999999999999999999999999999999999999999999999999"
+          }
+        }
+      ],
+      "counterparty": "0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359"
+    },
+    "canonical": "{\"actor\":\"registrar\",\"actorAddress\":\"0x7434fc9d31febe08082a710b255f3fe51b6a7ffc\",\"advisory\":false,\"blockNumber\":1215,\"blockTimestamp\":\"2026-09-28T12:06:59.000Z\",\"carriedHash\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"counterparty\":\"0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359\",\"createdAt\":\"2026-09-28T12:07:00.000Z\",\"customerId\":\"01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f\",\"events\":[{\"args\":{\"counterparty\":\"0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359\",\"limit\":\"100000000\",\"recordHash\":\"0x9999999999999999999999999999999999999999999999999999999999999999\"},\"logIndex\":1,\"name\":\"CounterpartyRegistered\"}],\"id\":\"01926f3a-8000-7000-8000-000000000008\",\"policyWallet\":\"0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\",\"prevHash\":\"0x8888888888888888888888888888888888888888888888888888888888888888\",\"reason\":\"Observed on-chain; Horos did not originate or evaluate this change.\",\"recordType\":\"external\",\"schemaVersion\":1,\"scope\":\"enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80\",\"seq\":7,\"simulated\":false,\"txHash\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}",
+    "hash": "0xa97251bcda6f67739f83e3db3a71aa33d2ef546af5a88b2a6694c5e6ce79d76c"
+  }
+]
