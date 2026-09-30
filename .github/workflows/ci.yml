@@ -115,6 +115,13 @@ jobs:
           pnpm --filter @horos/adapters abi:generate
           git diff --exit-code packages/adapters/src/chain/policy-wallet-abi.ts
 
+      # Story 3.2: the SDK deploy helper's committed ABI, creation bytecode and expected codehash must match this build.
+      - name: SDK PolicyWallet artifact matches the committed file (no drift)
+        working-directory: .
+        run: |
+          pnpm --filter @horos/sdk artifact:generate
+          git diff --exit-code packages/sdk/src/generated
+
   arc-fork:
     name: Arc fork tests (arc-foundry)
     runs-on: ubuntu-latest

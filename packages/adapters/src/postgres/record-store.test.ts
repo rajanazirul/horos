@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import type { PGlite } from "@electric-sql/pglite";
 import {
   buildDecisionRecord,
   buildExternalRecord,
@@ -23,9 +22,9 @@ import type { HorosDb } from "./db.js";
 import { runMigrations } from "./migrate.js";
 import { exportScopeChain, PostgresRecordStore, ScopeMismatchError } from "./record-store.js";
 import { decisionRecord } from "./schema.js";
-import { freshDb } from "./test-db.js";
+import { freshDb, testServerUrl, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
@@ -115,7 +114,7 @@ function externalContext(): ExternalRecordContext {
 
 const nonce = () => `0x${randomBytes(32).toString("hex")}`;
 
-async function pgliteStore() {
+async function setupStore() {
   const r = await freshDb();
   clients.push(r.client);
   const store = new PostgresRecordStore(r.db);
@@ -129,12 +128,12 @@ const append = (store: PostgresRecordStore, scope: Scope, extra: { nonce?: strin
   return store.append({ scope, build: (seq, prev) => buildDecisionRecord(ctx, seq, prev), ...extra });
 };
 
-async function count(client: PGlite, table: string): Promise<number> {
+async function count(client: TestClient, table: string): Promise<number> {
   const r = await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`);
   return r.rows[0]?.n ?? -1;
 }
 
-/** Shared by the PGlite and real-Postgres runs: 50 concurrent appends form one linear, verifiable chain. */
+/** Shared by the one-connection and pooled runs: 50 concurrent appends form one linear, verifiable chain. */
 async function fiftyConcurrent(db: HorosDb, store: PostgresRecordStore, scope: Scope): Promise<void> {
   const results = await Promise.all(Array.from({ length: 50 }, () => append(store, scope, { nonce: nonce() })));
   expect(results.map((r) => r.record.seq).sort((a, b) => a - b)).toEqual(Array.from({ length: 50 }, (_, i) => i));
@@ -145,9 +144,9 @@ async function fiftyConcurrent(db: HorosDb, store: PostgresRecordStore, scope: S
   expect(await store.head(scope)).toEqual({ nextSeq: 50, headHash: chain[49]?.recordHash });
 }
 
-describe("PostgresRecordStore (PGlite)", () => {
+describe("PostgresRecordStore (one connection)", () => {
   test("genesis: seq 0, zero prevHash; head advances to next_seq 1 with its hash", async () => {
-    const { store } = await pgliteStore();
+    const { store } = await setupStore();
     expect(await store.head(ENFORCED)).toBeUndefined();
     const r = await append(store, ENFORCED);
     expect(r.record.seq).toBe(0);
@@ -160,7 +159,7 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("linked: three appends chain prevHash to the previous record_hash", async () => {
-    const { store } = await pgliteStore();
+    const { store } = await setupStore();
     const rs = [await append(store, ENFORCED), await append(store, ENFORCED), await append(store, ENFORCED)];
     expect(rs.map((r) => r.record.seq)).toEqual([0, 1, 2]);
     expect(rs[1]?.record.prevHash).toBe(rs[0]?.recordHash);
@@ -168,12 +167,12 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("50 concurrent appends to one scope form a linear chain that verifies", async () => {
-    const { db, store } = await pgliteStore();
+    const { db, store } = await setupStore();
     await fiftyConcurrent(db, store, ENFORCED);
   });
 
   test("two scopes interleaved keep independent chains, each from 0", async () => {
-    const { db, store } = await pgliteStore();
+    const { db, store } = await setupStore();
     await Promise.all([append(store, ENFORCED), append(store, SHADOW), append(store, ENFORCED), append(store, SHADOW), append(store, SHADOW)]);
     expect((await store.readChain(ENFORCED)).map((r) => r.seq)).toEqual([0, 1]);
     expect((await store.readChain(SHADOW)).map((r) => r.seq)).toEqual([0, 1, 2]);
@@ -182,7 +181,7 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("nonce replay: NonceReplayError, no record, head unchanged; the same nonce is fine in another scope", async () => {
-    const { client, store } = await pgliteStore();
+    const { client, store } = await setupStore();
     const n = nonce();
     const first = await append(store, ENFORCED, { nonce: n });
     await expect(append(store, ENFORCED, { nonce: n })).rejects.toBeInstanceOf(NonceReplayError);
@@ -195,7 +194,7 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("build throwing or returning an invalid record writes nothing", async () => {
-    const { client, store } = await pgliteStore();
+    const { client, store } = await setupStore();
     await append(store, ENFORCED);
     const head = await store.head(ENFORCED);
     await expect(
@@ -220,7 +219,7 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("extraWrites runs in the transaction; when it throws, record, nonce and head roll back", async () => {
-    const { client, store } = await pgliteStore();
+    const { client, store } = await setupStore();
     const ctx = context(ENFORCED);
     let visible: string[] = [];
     let seenHash: string | undefined;
@@ -257,20 +256,20 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("provenance: a Demo-List match in a shadow scope is simulated and advisory", async () => {
-    const { store } = await pgliteStore();
+    const { store } = await setupStore();
     const ctx = context(SHADOW, DEMO_ADDR);
     const r = await store.append({ scope: SHADOW, build: (seq, prev) => buildDecisionRecord(ctx, seq, prev) });
     expect(r.record).toMatchObject({ simulated: true, advisory: true, decision: "block", targetLimit: "0" });
   });
 
   test("an unknown scope is rejected by the foreign key and writes nothing", async () => {
-    const { client, store } = await pgliteStore();
+    const { client, store } = await setupStore();
     await expect(append(store, "shadow:01926f3a-7b2c-7d4e-8f10-2a3b4c5d6e70")).rejects.toThrow();
     expect(await count(client, "record_chain_head")).toBe(0);
   });
 
   test("ensureScope rejects an existing id with a different customer or wallet", async () => {
-    const { store } = await pgliteStore();
+    const { store } = await setupStore();
     const other = "0x1234567890123456789012345678901234567890";
     await expect(store.ensureScope({ id: ENFORCED, customerId: CUSTOMER, policyWallet: other })).rejects.toBeInstanceOf(ScopeMismatchError);
     await expect(
@@ -284,7 +283,7 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("append rejects a record whose policyWallet or customerId disagree with its Scope, writing nothing", async () => {
-    const { client, store } = await pgliteStore();
+    const { client, store } = await setupStore();
     const wrongWallet = { ...context(ENFORCED), policyWallet: "0x1234567890123456789012345678901234567890" };
     await expect(
       store.append({ scope: ENFORCED, build: (seq, prev) => buildDecisionRecord(wrongWallet, seq, prev), nonce: nonce() }),
@@ -299,7 +298,7 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("ensureScope is idempotent and records kind, customer and wallet", async () => {
-    const { client, store } = await pgliteStore();
+    const { client, store } = await setupStore();
     await store.ensureScope({ id: ENFORCED, customerId: CUSTOMER, policyWallet: WALLET.toUpperCase().replace("0X", "0x") });
     await store.ensureScope({ id: "advisory-public" });
     const rows = await client.query(`SELECT id, kind, customer_id, policy_wallet FROM scope ORDER BY id`);
@@ -311,7 +310,7 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("a chain mixing DecisionRecords and ExternalRecords exports, verifies, and breaks where an external record is edited", async () => {
-    const { db, store, client } = await pgliteStore();
+    const { db, store, client } = await setupStore();
     await append(store, ENFORCED);
     const ext = await store.append({ scope: ENFORCED, build: (seq, prev) => buildExternalRecord(externalContext(), seq, prev) });
     expect(ext.record).toMatchObject({ recordType: "external", seq: 1, counterparty: PAYEE });
@@ -330,14 +329,14 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 
   test("an ExternalRecord naming another PolicyWallet is rejected", async () => {
-    const { client, store } = await pgliteStore();
+    const { client, store } = await setupStore();
     const wrong = { ...externalContext(), policyWallet: "0x1234567890123456789012345678901234567890" };
     await expect(store.append({ scope: ENFORCED, build: (seq, prev) => buildExternalRecord(wrong, seq, prev) })).rejects.toThrow(/policyWallet differs/);
     expect(await count(client, "decision_record")).toBe(0);
   });
 
   test("export round-trips through verifyChain; a tampered reason breaks at that line", async () => {
-    const { db, store } = await pgliteStore();
+    const { db, store } = await setupStore();
     for (let i = 0; i < 3; i++) await append(store, ENFORCED);
     const text = await exportScopeChain(db, ENFORCED);
     expect(text.endsWith("\n")).toBe(true);
@@ -350,9 +349,9 @@ describe("PostgresRecordStore (PGlite)", () => {
   });
 });
 
-const REAL_URL = process.env["HOROS_TEST_DATABASE_URL"];
+const REAL_URL = testServerUrl();
 
-describe.skipIf(REAL_URL === undefined || REAL_URL === "")("PostgresRecordStore (real Postgres)", () => {
+describe("PostgresRecordStore (real Postgres)", () => {
   const dbName = `horos_test_${randomBytes(6).toString("hex")}`;
   let conn: ReturnType<typeof connectPostgres> | undefined;
 
@@ -368,7 +367,7 @@ describe.skipIf(REAL_URL === undefined || REAL_URL === "")("PostgresRecordStore 
 
   beforeAll(async () => {
     await admin((c) => c.query(`CREATE DATABASE ${dbName}`));
-    const url = new URL(REAL_URL ?? "");
+    const url = new URL(REAL_URL);
     url.pathname = `/${dbName}`;
     // Migrations run as the connecting (migrator) role; the appends then run as horos_app, so the
     // production grants are what the test exercises.

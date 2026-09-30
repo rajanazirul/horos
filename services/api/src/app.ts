@@ -2,6 +2,7 @@
 // Story 2.6: onboarding, bind and webhook updates (./onboarding.ts), mounted when their deps are given.
 // Story 2.8: read-only records and Counterparty statuses (./reads.ts), mounted when `reads` is given.
 // Story 2.9: `POST /v1/check` (./check.ts), mounted when `check` is given.
+// Story 3.4: Shadow Mode (./shadow.ts), mounted when `shadow` is given (with `check` and `chainId`).
 // Unknown routes answer 404 `not_found` and uncaught errors 500 `internal`, both as the AD-17 envelope.
 import { createHash, timingSafeEqual } from "node:crypto";
 import { SeqConflictError, decideActivation, type AccountStore, type ChainReader, type PolicyVersionStore, type ReadStore } from "@horos/core";
@@ -19,6 +20,7 @@ import { registerCheckRoute } from "./check.js";
 import { describeIssues, fail } from "./http.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerReadRoutes } from "./reads.js";
+import { registerShadowRoutes, type ShadowAccounts } from "./shadow.js";
 
 export interface AppDeps {
   readonly policyVersions: PolicyVersionStore;
@@ -38,8 +40,16 @@ export interface AppDeps {
   readonly reads?: ReadStore;
   /** A Scope readable without auth (the Horos Demo wallet's). */
   readonly publicDemoScope?: string;
-  /** Maps an `x-horos-api-key` to its shadow Scope. Absent: API keys are refused. */
+  /** Maps an `x-horos-api-key` to its shadow Scope. Absent: derived from `shadow` when set, else API keys are refused. */
   readonly resolveShadowKey?: (key: string) => Promise<string | undefined>;
+  /**
+   * Shadow Mode (Story 3.4): sign-up, API keys and outcome counts. `POST /v1/shadow` and `POST /v1/shadow/check` are
+   * mounted when `shadow`, `check` (with its `ledger`) and `chainId` are set; the summary read route when `shadow` and
+   * `reads` are.
+   */
+  readonly shadow?: ShadowAccounts;
+  /** Shadow sign-up attempts and failed API keys per minute per client IP. Default 20. */
+  readonly shadowIpRatePerMinute?: number;
   /** Structured log sink; entries never carry secrets or webhook query strings. */
   readonly log?: (entry: Record<string, unknown>) => void;
   /** Sink for uncaught handler errors (the entry carries the raw error: the sink must redact). Default `log`. */
@@ -132,6 +142,10 @@ export function createApp(deps: AppDeps): Hono {
     });
   }
 
+  const shadow = deps.shadow;
+  const resolveShadowKey =
+    deps.resolveShadowKey ?? (shadow === undefined ? undefined : async (key: string) => (await shadow.resolveKey(key))?.scope);
+
   if (deps.reads !== undefined) {
     registerReadRoutes(app, {
       reads: deps.reads,
@@ -140,7 +154,8 @@ export function createApp(deps: AppDeps): Hono {
       ...(deps.chainReader === undefined ? {} : { chainReader: deps.chainReader }),
       ...(deps.chainId === undefined ? {} : { chainId: deps.chainId }),
       ...(deps.publicDemoScope === undefined ? {} : { publicDemoScope: deps.publicDemoScope }),
-      ...(deps.resolveShadowKey === undefined ? {} : { resolveShadowKey: deps.resolveShadowKey }),
+      ...(resolveShadowKey === undefined ? {} : { resolveShadowKey }),
+      ...(shadow === undefined ? {} : { shadowSummary: (scope: string) => shadow.summary(scope) }),
       ...(deps.log === undefined ? {} : { log: deps.log }),
     });
   }
@@ -150,6 +165,21 @@ export function createApp(deps: AppDeps): Hono {
       check: deps.check,
       now: deps.now,
       ...(deps.checkRatePerMinute === undefined ? {} : { checkRatePerMinute: deps.checkRatePerMinute }),
+      ...(deps.remoteAddress === undefined ? {} : { remoteAddress: deps.remoteAddress }),
+      ...(deps.trustedProxyHops === undefined ? {} : { trustedProxyHops: deps.trustedProxyHops }),
+      ...(deps.log === undefined ? {} : { log: deps.log }),
+    });
+  }
+
+  if (shadow !== undefined && deps.check !== undefined && deps.chainId !== undefined) {
+    registerShadowRoutes(app, {
+      shadow,
+      check: deps.check,
+      chainId: deps.chainId,
+      now: deps.now,
+      isAdmin: (c) => bearerMatches(c.req.header("authorization"), adminDigest),
+      ...(deps.checkRatePerMinute === undefined ? {} : { checkRatePerMinute: deps.checkRatePerMinute }),
+      ...(deps.shadowIpRatePerMinute === undefined ? {} : { shadowIpRatePerMinute: deps.shadowIpRatePerMinute }),
       ...(deps.remoteAddress === undefined ? {} : { remoteAddress: deps.remoteAddress }),
       ...(deps.trustedProxyHops === undefined ? {} : { trustedProxyHops: deps.trustedProxyHops }),
       ...(deps.log === undefined ? {} : { log: deps.log }),

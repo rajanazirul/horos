@@ -1,6 +1,6 @@
 // Story 2.7 indexer: every I/O-matrix row with a fake chain reader, pipeline fixtures (core `evaluate` +
-// `buildDecisionRecord` through `outboxExtraWrites`) and the real Story 2.6 outbox sender, on PGlite.
-import type { PGlite } from "@electric-sql/pglite";
+// `buildDecisionRecord` through `outboxExtraWrites`) and the real Story 2.6 outbox sender, on the test Postgres.
+import { freshDb, type TestClient } from "@horos/adapters/testing";
 import {
   outboxExtraWrites,
   PostgresAccountStore,
@@ -32,9 +32,7 @@ import {
   type WriteStatus,
 } from "@horos/core";
 import { isExternalRecord, toWireTime, ZERO_BYTES32, type ExternalRecord, type Hex, type Scope } from "@horos/schema";
-import { drizzle } from "drizzle-orm/pglite";
-import { migratedClient, migratedDump } from "./migrated-db.test-helpers.js";
-import { afterEach, beforeAll, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { findDeployBlock, UNRECOGNISED_WRITE_ALERT_JOB } from "./indexer.js";
 import { createWorker } from "./tick.js";
 
@@ -77,6 +75,9 @@ const unregistered: ChainView = {
 };
 const registered = (limit: bigint, humanEpoch = 0n): ChainView => ({ ...unregistered, registered: true, limit, cpRemaining: limit, humanEpoch });
 
+/** The shape viem gives a JSON-RPC -32005 answer (the code sits on the cause). */
+const rateLimited = () => Object.assign(new Error("RPC Request failed. Details: rate limit exceeded"), { cause: { code: -32005, message: "rate limit exceeded" } });
+
 /** A fake chain: live views for the sender, and a log history for the indexer. */
 class FakeChain implements ChainReader {
   views = new Map<string, ChainView>();
@@ -86,8 +87,13 @@ class FakeChain implements ChainReader {
   history: (PolicyWalletLog & { wallet: Hex })[] = [];
   senders = new Map<string, Hex>();
   logCalls: [bigint, bigint][] = [];
+  logWallets: Hex[] = [];
+  latestCalls = 0;
   failLogs = false;
   failWallets = new Set<Hex>();
+  /** Wallets whose `logs` read answers like a saturated public RPC (JSON-RPC -32005 "rate limit exceeded"). */
+  rateLimitWallets = new Set<Hex>();
+  rateLimitLatest = false;
   roleSet: WalletRoles = { payment: PAY, registrar: KEYS.registrar.address, model: KEYS.model.address, rules: KEYS.rules.address, human: HUMAN };
   /** Role holders as of a block; blocks not listed use `roleSet`. */
   rolesByBlock = new Map<bigint, WalletRoles>();
@@ -121,11 +127,15 @@ class FakeChain implements ChainReader {
     return this.simulateResult;
   }
   async latestBlock() {
+    this.latestCalls++;
+    if (this.rateLimitLatest) throw rateLimited();
     return this.head;
   }
   async logs(w: Hex, from: bigint, to: bigint): Promise<PolicyWalletLog[]> {
     this.logCalls.push([from, to]);
+    this.logWallets.push(w);
     if (this.failLogs || this.failWallets.has(w)) throw new Error("rpc down");
+    if (this.rateLimitWallets.has(w)) throw rateLimited();
     return this.history
       .filter((l) => l.wallet === w && l.blockNumber >= from && l.blockNumber <= to)
       .map((l): PolicyWalletLog => ({ name: l.name, args: l.args, txHash: l.txHash, logIndex: l.logIndex, blockNumber: l.blockNumber }))
@@ -150,11 +160,13 @@ class FakeChain implements ChainReader {
 class FakeWriter implements ChainWriter {
   sent: WriteRequest[] = [];
   statusResult: WriteStatus = { state: "pending" };
+  statusCalls = 0;
   async send(req: WriteRequest) {
     this.sent.push(req);
     return { txId: `tx-${this.sent.length}` };
   }
   async status() {
+    this.statusCalls++;
     return this.statusResult;
   }
 }
@@ -185,20 +197,14 @@ class CrashyJobStore extends PostgresJobStore {
 
 const noFetch: FetchSdn = async () => ({ status: 304 });
 
-// Migrate once for the file, outside any single test's timeout.
-beforeAll(async () => {
-  await migratedDump();
-});
-
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
 
-async function setup(opts: { lists?: ListSnapshot[]; chunkSize?: bigint } = {}) {
-  const client = await migratedClient();
+async function setup(opts: { lists?: ListSnapshot[]; chunkSize?: bigint; maxChunksPerTick?: number; rateLimitCooldownMs?: number } = {}) {
+  const { client, db } = await freshDb();
   clients.push(client);
-  const db = drizzle(client);
   const accounts = new PostgresAccountStore(db);
   const records = new PostgresRecordStore(db);
   const outbox = new PostgresOutboxStore(db);
@@ -219,7 +225,17 @@ async function setup(opts: { lists?: ListSnapshot[]; chunkSize?: bigint } = {}) 
     notifier,
     newId: () => uuidv7(),
     outbox: { accounts, outbox, records, reader: chain, writer, notifier, loadLists: async () => lists, newId: uuidv7 },
-    indexer: { store, jobs, records, reader: chain, notifier, newId: uuidv7, ...(opts.chunkSize === undefined ? {} : { chunkSize: opts.chunkSize }) },
+    indexer: {
+      store,
+      jobs,
+      records,
+      reader: chain,
+      notifier,
+      newId: uuidv7,
+      ...(opts.chunkSize === undefined ? {} : { chunkSize: opts.chunkSize }),
+      ...(opts.maxChunksPerTick === undefined ? {} : { maxChunksPerTick: opts.maxChunksPerTick }),
+      ...(opts.rateLimitCooldownMs === undefined ? {} : { rateLimitCooldownMs: opts.rateLimitCooldownMs }),
+    },
   });
 
   async function decide(p: { target: bigint; counterparty?: Hex; view?: ChainView; lists?: ListSnapshot[]; now?: Date }) {
@@ -295,10 +311,10 @@ describe("indexer: matched Horos writes", () => {
   test("2.6 race (500, 100 → one register(a, 100)): both records get confirmed receipts at 100, intentState confirmed", async () => {
     const s = await setup();
     const [r500, r100] = await Promise.all([s.decide({ target: 500n * USDC }), s.decide({ target: 100n * USDC })]);
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect(s.writer.sent.map((w) => w.call)).toEqual([{ fn: "register", counterparty: A, limit: 100n * USDC, recordHash: r100.recordHash }]);
     const txHash = s.mineSent();
-    const report = await s.worker.tick(at(1));
+    const report = await s.worker.fullTick(at(1));
     expect(report.indexer?.wallets).toEqual([expect.objectContaining({ confirmed: 1, external: 0 })]);
     const receipts = await s.store.receipts(s.scope);
     expect(receipts.map((r) => [r.recordId, r.status, r.onchainLimitAfter, r.txHash]).sort()).toEqual(
@@ -317,22 +333,22 @@ describe("indexer: matched Horos writes", () => {
   test("the indexer confirms even before the sender has stored the tx hash (status still submitted)", async () => {
     const s = await setup();
     const r = await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     s.mineSent();
     s.writer.statusResult = { state: "pending" }; // Circle has not reported the hash yet
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect(await s.outbox.intentState(s.scope, A, r.record.id)).toBe("confirmed");
   });
 
   test("a write requeued to pending (Circle reported FAILED) that was mined anyway → confirmed receipts, no ExternalRecord, no alert", async () => {
     const s = await setup();
     const r = await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     s.writer.statusResult = { state: "failed", error: "FAILED" };
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect((await s.outbox.list(s.scope, A))[0]).toMatchObject({ status: "pending" });
     const txHash = s.mineSent();
-    await s.worker.tick(at(2));
+    await s.worker.fullTick(at(2));
     expect(await s.store.receipts(s.scope, r.record.id)).toEqual([expect.objectContaining({ status: "confirmed", txHash, onchainLimitAfter: 100n * USDC })]);
     expect(await s.outbox.intentState(s.scope, A, r.record.id)).toBe("confirmed");
     expect(await s.externals()).toEqual([]);
@@ -343,17 +359,17 @@ describe("indexer: matched Horos writes", () => {
   async function mergedAfterFailure(t2: bigint) {
     const s = await setup();
     const r1 = await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0); // register(A, 100, r1) submitted
+    await s.worker.fullTick(T0); // register(A, 100, r1) submitted
     const r2 = await s.decide({ target: t2, now: at(1) }); // a new pending row while r1's write is in flight
     s.writer.statusResult = { state: "failed", error: "FAILED" };
     s.chain.simulateResult = { ok: false, revert: "AlreadyRegistered" }; // keep the survivor unsent this tick
-    await s.worker.tick(at(2)); // r1's row requeued → merged into r2's row (noop + merged_into)
+    await s.worker.fullTick(at(2)); // r1's row requeued → merged into r2's row (noop + merged_into)
     s.chain.simulateResult = { ok: true };
     const merged = (await s.outbox.list(s.scope, A)).find((x) => x.status === "noop");
     expect(merged?.mergedInto).toBeTruthy();
     s.mineSent(0); // the first register was mined after all
     s.chain.views.set(A, registered(100n * USDC));
-    await s.worker.tick(at(3));
+    await s.worker.fullTick(at(3));
     return { s, r1, r2, mergedId: merged?.id ?? "", survivorId: merged?.mergedInto ?? "" };
   }
 
@@ -381,26 +397,26 @@ describe("indexer: matched Horos writes", () => {
     expect(s.notifier.alerts).toEqual([]);
     // Replaying the chunk adds nothing.
     await s.store.setCursor(WALLET, s.scope, DEPLOY_BLOCK, at(4));
-    await s.worker.tick(at(5));
+    await s.worker.fullTick(at(5));
     expect(await s.store.receipts(s.scope)).toHaveLength(1);
     // Once due, the sender sends the tighter Limit.
-    await s.worker.tick(at(120));
+    await s.worker.fullTick(at(120));
     expect(s.writer.sent.at(-1)?.call).toMatchObject({ fn: "tighten", counterparty: A, limit: 40n * USDC });
   });
 
   test("a stored tx hash that differs from the mined tx (a replacement) is only a hint: still confirmed, hash overwritten", async () => {
     const s = await setup();
     const r = await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     s.writer.statusResult = { state: "complete", txHash: H("d") };
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect((await s.outbox.list(s.scope, A))[0]?.txHash).toBe(H("d"));
     const call = s.writer.sent[0]?.call;
     if (call?.fn !== "register") throw new Error("expected register");
     const mined = s.chain.mine(KEYS.registrar.address, [
       { name: "CounterpartyRegistered", args: { counterparty: A, limit: call.limit.toString(), recordHash: call.recordHash } },
     ]);
-    await s.worker.tick(at(2));
+    await s.worker.fullTick(at(2));
     expect(await s.outbox.intentState(s.scope, A, r.record.id)).toBe("confirmed");
     expect((await s.outbox.list(s.scope, A))[0]?.txHash).toBe(mined);
     expect(await s.externals()).toEqual([]);
@@ -409,13 +425,13 @@ describe("indexer: matched Horos writes", () => {
   test("a Human setLimit(a, l ≤ target) carrying an in-flight register's hash is never a Horos write", async () => {
     const s = await setup();
     const r = await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     const sendHash = (await s.outbox.list(s.scope, A))[0]?.sendRecordHash ?? H("0");
     s.chain.mine(HUMAN, [
       { name: "CounterpartyRegistered", args: { counterparty: A, limit: "50000000", recordHash: sendHash } },
       { name: "LimitSet", args: { counterparty: A, oldLimit: "0", newLimit: "50000000", humanEpoch: "1", recordHash: sendHash } },
     ]);
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect(await s.store.receipts(s.scope)).toEqual([]);
     expect(await s.outbox.intentState(s.scope, A, r.record.id)).toBe("pending");
     const exts = await s.externals();
@@ -428,14 +444,14 @@ describe("indexer: matched Horos writes", () => {
     const listed = [sdn([[A, ["EXAMPLE SANCTIONED ENTITY"]]])];
     const s = await setup({ lists: listed });
     const r = await s.decide({ target: 100n * USDC, lists: listed });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     const call = s.writer.sent[0]?.call;
     expect(call).toMatchObject({ fn: "pin", counterparty: A });
     s.mineSent(0, [
       { name: "CounterpartyRegistered", args: { counterparty: A, limit: "0", recordHash: r.recordHash } },
       { name: "CounterpartyPinned", args: { counterparty: A, recordHash: r.recordHash } },
     ]);
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect(await s.store.receipts(s.scope)).toEqual([expect.objectContaining({ recordId: r.record.id, status: "confirmed", onchainLimitAfter: 0n })]);
     expect(await s.store.mirror(s.scope, A)).toMatchObject({ registered: true, pinned: true, limit: 0n, firstRegisteredBlock: 10n });
     expect(await s.externals()).toEqual([]);
@@ -446,10 +462,10 @@ describe("indexer: matched Horos writes", () => {
     const s = await setup();
     s.chain.views.set(A, registered(200n * USDC));
     const r = await s.decide({ target: 50n * USDC, view: registered(200n * USDC) });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect(s.writer.sent[0]?.call).toMatchObject({ fn: "tighten", limit: 50n * USDC });
     s.mineSent();
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect(await s.store.receipts(s.scope, r.record.id)).toEqual([expect.objectContaining({ status: "confirmed", onchainLimitAfter: 50n * USDC })]);
     expect(await s.store.mirror(s.scope, A)).toMatchObject({ limit: 50n * USDC, registered: false });
     expect(await s.store.monitoredSet(s.scope)).toEqual([]); // a tighten never registers
@@ -464,7 +480,7 @@ describe("indexer: ExternalRecords", () => {
       { name: "CounterpartyRegistered", args: { counterparty: B, limit: "300", recordHash: h } },
       { name: "LimitSet", args: { counterparty: B, oldLimit: "0", newLimit: "300", humanEpoch: "1", recordHash: h } },
     ]);
-    const report = await s.worker.tick(T0);
+    const report = await s.worker.fullTick(T0);
     expect(report.indexer?.wallets[0]).toMatchObject({ external: 1, alerts: 0 });
     const [ext, ...rest] = await s.externals();
     expect(rest).toEqual([]);
@@ -493,9 +509,9 @@ describe("indexer: ExternalRecords", () => {
     const s = await setup();
     s.chain.views.set(A, registered(200n * USDC));
     const r = await s.decide({ target: 50n * USDC, view: registered(200n * USDC) });
-    await s.worker.tick(T0); // tighten in flight, carrying r's hash
+    await s.worker.fullTick(T0); // tighten in flight, carrying r's hash
     s.chain.mine(HUMAN, [{ name: "LimitSet", args: { counterparty: A, oldLimit: "200000000", newLimit: "900000000", humanEpoch: "1", recordHash: r.recordHash } }]);
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     const [ext] = await s.externals();
     expect(ext).toMatchObject({ actor: "human", carriedHash: r.recordHash, counterparty: A });
     expect(await s.store.receipts(s.scope)).toEqual([]);
@@ -505,9 +521,9 @@ describe("indexer: ExternalRecords", () => {
   test("a tx that looks like a Horos write but carries a hash no in-flight intent explains is external too (a Registered with a larger limit)", async () => {
     const s = await setup();
     const r = await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     s.mineSent(0, [{ name: "CounterpartyRegistered", args: { counterparty: A, limit: "400000000", recordHash: r.recordHash } }]);
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect(await s.store.receipts(s.scope)).toEqual([]);
     expect((await s.externals())[0]).toMatchObject({ actor: "registrar", carriedHash: r.recordHash });
   });
@@ -515,7 +531,7 @@ describe("indexer: ExternalRecords", () => {
   test("counterparty-less PolicyChanged → ExternalRecord without counterparty", async () => {
     const s = await setup();
     s.chain.mine(HUMAN, [{ name: "PolicyChanged", args: { field: "0", oldValue: "500000000", newValue: "250000000", recordHash: ZERO_BYTES32 } }]);
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     const [ext] = await s.externals();
     expect(ext).toMatchObject({ actor: "human", carriedHash: ZERO_BYTES32 });
     expect(ext).not.toHaveProperty("counterparty");
@@ -526,7 +542,7 @@ describe("indexer: ExternalRecords", () => {
     const NEW_HUMAN: Hex = `0x${"8".repeat(40)}`;
     s.chain.mine(NEW_HUMAN, [{ name: "OwnershipTransferred", args: { from: HUMAN, to: NEW_HUMAN, recordHash: H("1") } }]);
     s.chain.mine(HUMAN, [{ name: "UnpinRequested", args: { counterparty: C, executableAt: "1790086422", reasonHash: H("2") } }]);
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     const [own, unpin] = await s.externals();
     expect(own).toMatchObject({ actor: "pending-human", actorAddress: NEW_HUMAN, carriedHash: H("1") });
     expect(own).not.toHaveProperty("counterparty");
@@ -537,14 +553,14 @@ describe("indexer: ExternalRecords", () => {
   test("unrecognised Registrar write (no intent) → ExternalRecord actor registrar + one founder alert", async () => {
     const s = await setup();
     const tx = s.chain.mine(KEYS.registrar.address, [{ name: "CounterpartyRegistered", args: { counterparty: C, limit: "50", recordHash: H("3") } }]);
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect((await s.externals())[0]).toMatchObject({ actor: "registrar", actorAddress: KEYS.registrar.address, counterparty: C, carriedHash: H("3") });
     expect(s.notifier.alerts).toEqual([
       expect.objectContaining({ kind: "unrecognised-horos-write", scope: s.scope, policyWallet: WALLET, txHash: tx, actor: "registrar" }),
     ]);
     // Replaying the chunk neither appends again nor re-alerts.
     await s.store.setCursor(WALLET, s.scope, DEPLOY_BLOCK, T0);
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect(await s.externals()).toHaveLength(1);
     expect(s.notifier.alerts).toHaveLength(1);
   });
@@ -553,13 +569,13 @@ describe("indexer: ExternalRecords", () => {
     const s = await setup();
     s.notifier.failNext = 1;
     const tx = s.chain.mine(KEYS.rules.address, [{ name: "CounterpartyPinned", args: { counterparty: C, recordHash: H("3") } }]);
-    const r1 = await s.worker.tick(T0);
+    const r1 = await s.worker.fullTick(T0);
     expect(r1.indexer?.alertErrors).toEqual([{ txHash: tx, error: "webhook down" }]);
     expect(s.notifier.alerts).toEqual([]);
-    const r2 = await s.worker.tick(at(1));
+    const r2 = await s.worker.fullTick(at(1));
     expect(r2.indexer?.alertsDelivered).toEqual([tx]);
     expect(s.notifier.alerts).toEqual([expect.objectContaining({ kind: "unrecognised-horos-write", txHash: tx, actor: "rules" })]);
-    await s.worker.tick(at(2));
+    await s.worker.fullTick(at(2));
     expect(s.notifier.alerts).toHaveLength(1);
   });
 
@@ -567,14 +583,14 @@ describe("indexer: ExternalRecords", () => {
     const s = await setup();
     s.jobs.failEnsure = 1;
     const tx = s.chain.mine(KEYS.registrar.address, [{ name: "CounterpartyRegistered", args: { counterparty: C, limit: "50", recordHash: H("3") } }]);
-    const r1 = await s.worker.tick(T0);
+    const r1 = await s.worker.fullTick(T0);
     expect(r1.indexer?.wallets[0]?.error).toMatch(/crash before the alert job/);
     expect(await s.externals()).toHaveLength(1); // appended before the crash
     expect(s.notifier.alerts).toEqual([]);
-    await s.worker.tick(at(1)); // replay: the record exists, the alert job is ensured and delivered
+    await s.worker.fullTick(at(1)); // replay: the record exists, the alert job is ensured and delivered
     expect(s.notifier.alerts).toEqual([expect.objectContaining({ txHash: tx, actor: "registrar" })]);
     await s.store.setCursor(WALLET, s.scope, DEPLOY_BLOCK, at(2));
-    await s.worker.tick(at(3)); // another replay
+    await s.worker.fullTick(at(3)); // another replay
     expect(await s.externals()).toHaveLength(1);
     expect(s.notifier.alerts).toHaveLength(1);
   });
@@ -584,7 +600,7 @@ describe("indexer: ExternalRecords", () => {
     const OLD_REGISTRAR: Hex = `0x${"6".repeat(40)}`;
     s.chain.rolesByBlock.set(s.chain.head - 1n, { ...s.chain.roleSet, registrar: OLD_REGISTRAR });
     s.chain.mine(OLD_REGISTRAR, [{ name: "CounterpartyRegistered", args: { counterparty: C, limit: "50", recordHash: H("3") } }]);
-    const r = await s.worker.tick(T0);
+    const r = await s.worker.fullTick(T0);
     expect(r.indexer?.wallets[0]?.error).toBeUndefined();
     expect((await s.externals())[0]).toMatchObject({ actor: "registrar", actorAddress: OLD_REGISTRAR });
     expect(s.notifier.alerts).toHaveLength(1);
@@ -599,7 +615,7 @@ describe("indexer: ExternalRecords", () => {
     const bound2 = await s.accounts.bind(b2.customerId, WALLET2, at(1));
     s.chain.mine(HUMAN, [{ name: "PolicyChanged", args: { field: "0", oldValue: "1", newValue: "2", recordHash: ZERO_BYTES32 } }], undefined, WALLET2);
     s.chain.failWallets.add(WALLET);
-    const r = await s.worker.tick(at(2));
+    const r = await s.worker.fullTick(at(2));
     expect(r.indexer?.wallets.map((w) => [w.policyWallet, w.error])).toEqual([
       [WALLET, "rpc down"],
       [WALLET2, undefined],
@@ -613,13 +629,13 @@ describe("indexer: ExternalRecords", () => {
   test("an unknown sender on a role-gated event is an error: the chunk is retried, the cursor stays", async () => {
     const s = await setup();
     s.chain.mine(STRANGER, [{ name: "LimitTightened", args: { counterparty: A, oldLimit: "0", newLimit: "0", recordHash: H("4") } }]);
-    const r1 = await s.worker.tick(T0);
+    const r1 = await s.worker.fullTick(T0);
     expect(r1.indexer?.wallets[0]?.error).toMatch(/holds no PolicyWallet role/);
     expect(await s.store.cursor(WALLET)).toBe(DEPLOY_BLOCK);
     expect(await s.externals()).toEqual([]);
     // The role turns out to be Model's (e.g. a mirror lag): the retry succeeds.
     s.chain.roleSet = { ...s.chain.roleSet, model: STRANGER };
-    const r2 = await s.worker.tick(at(1));
+    const r2 = await s.worker.fullTick(at(1));
     expect(r2.indexer?.wallets[0]?.error).toBeUndefined();
     expect((await s.externals())[0]).toMatchObject({ actor: "model" });
   });
@@ -630,7 +646,7 @@ describe("indexer: ExternalRecords", () => {
     s.chain.mine(KEYS.rules.address, [{ name: "PinReleased", args: { counterparty: A, recordHash: H("6") } }]);
     s.chain.mine(KEYS.rules.address, [{ name: "CounterpartyPinned", args: { counterparty: A, recordHash: H("7") } }]);
     s.chain.mine(HUMAN, [{ name: "PinReleased", args: { counterparty: A, recordHash: H("8") } }]);
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect((await s.externals()).map((e) => e.actor)).toEqual(["rules", "rules", "rules", "human"]);
     expect(await s.store.mirror(s.scope, A)).toMatchObject({ pinned: false, humanEpoch: 1n });
   });
@@ -642,7 +658,7 @@ describe("indexer: Paid, replay, cursor, reconciliation, Monitored set", () => {
     const r = await s.decide({ target: 100n * USDC });
     s.chain.mine(PAY, [{ name: "Paid", args: { counterparty: A, amount: "5", recordHash: r.recordHash } }]);
     s.chain.mine(PAY, [{ name: "Paid", args: { counterparty: A, amount: "6", recordHash: H("e") } }]);
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     const paid = await s.store.paidEvents(s.scope);
     expect(paid.map((p) => [p.amount, p.matchedRecordId])).toEqual([
       [5n, r.record.id],
@@ -655,11 +671,11 @@ describe("indexer: Paid, replay, cursor, reconciliation, Monitored set", () => {
   test("replaying a chunk writes nothing new and leaves the mirror unchanged", async () => {
     const s = await setup();
     await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     s.mineSent();
     s.chain.mine(HUMAN, [{ name: "LimitSet", args: { counterparty: A, oldLimit: "100000000", newLimit: "300000000", humanEpoch: "1", recordHash: H("7") } }]);
     s.chain.mine(PAY, [{ name: "Paid", args: { counterparty: A, amount: "5", recordHash: H("e") } }]);
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     const snapshot = async () => ({
       receipts: await s.store.receipts(s.scope),
       paid: await s.store.paidEvents(s.scope),
@@ -671,7 +687,7 @@ describe("indexer: Paid, replay, cursor, reconciliation, Monitored set", () => {
     expect(before.receipts).toHaveLength(1);
     expect(before.chain).toHaveLength(2);
     await s.store.setCursor(WALLET, s.scope, DEPLOY_BLOCK, at(2));
-    const report = await s.worker.tick(at(3));
+    const report = await s.worker.fullTick(at(3));
     expect(report.indexer?.wallets[0]?.error).toBeUndefined();
     expect(await snapshot()).toEqual(before);
   });
@@ -681,7 +697,7 @@ describe("indexer: Paid, replay, cursor, reconciliation, Monitored set", () => {
     s.chain.deployBlock = 1234n;
     s.chain.head = 5000n;
     expect(await findDeployBlock(s.chain, WALLET, 5000n)).toBe(1234n);
-    const report = await s.worker.tick(T0);
+    const report = await s.worker.fullTick(T0);
     expect(s.chain.logCalls).toEqual([
       [1234n, 3233n],
       [3234n, 4999n],
@@ -689,14 +705,14 @@ describe("indexer: Paid, replay, cursor, reconciliation, Monitored set", () => {
     expect(report.indexer?.wallets[0]).toMatchObject({ chunks: 2, nextBlock: 5000n });
     expect(await s.store.cursor(WALLET)).toBe(5000n);
     s.chain.logCalls = [];
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect(s.chain.logCalls).toEqual([]); // nothing new below latest − confirmations
   });
 
   test("a failing logs read leaves the cursor and reports the error (other work in the tick still runs)", async () => {
     const s = await setup();
     s.chain.failLogs = true;
-    const report = await s.worker.tick(T0);
+    const report = await s.worker.fullTick(T0);
     expect(report.indexer?.wallets[0]?.error).toBe("rpc down");
     expect(await s.store.cursor(WALLET)).toBe(DEPLOY_BLOCK);
     expect(report.indexer?.reconciled).toBe(0);
@@ -710,7 +726,7 @@ describe("indexer: Paid, replay, cursor, reconciliation, Monitored set", () => {
     const rStale = await s.decide({ target: 50n * USDC, counterparty: B, view: registered(200n * USDC) });
     const rCap = await s.decide({ target: 50n * USDC, counterparty: C });
     s.chain.simulateResult = { ok: false, revert: "StaleEpoch" };
-    await s.worker.tick(T0); // A: noop; B: StaleEpoch (terminal); C: register → StaleEpoch too
+    await s.worker.fullTick(T0); // A: noop; B: StaleEpoch (terminal); C: register → StaleEpoch too
     s.chain.simulateResult = { ok: true };
     const receipts = await s.store.receipts(s.scope);
     const status = (id: string) => receipts.filter((r) => r.recordId === id).map((r) => r.status);
@@ -721,7 +737,7 @@ describe("indexer: Paid, replay, cursor, reconciliation, Monitored set", () => {
     const D: Hex = "0x4444444444444444444444444444444444444444";
     const rFail = await s.decide({ target: 50n * USDC, counterparty: D, now: at(1) });
     s.chain.simulateResult = { ok: false, revert: "NewPayeeCapReached" };
-    await s.worker.tick(at(2));
+    await s.worker.fullTick(at(2));
     expect((await s.store.receipts(s.scope, rFail.record.id)).map((r) => r.status)).toEqual(["failed_terminal"]);
   });
 
@@ -733,7 +749,206 @@ describe("indexer: Paid, replay, cursor, reconciliation, Monitored set", () => {
       { name: "LimitSet", args: { counterparty: A, oldLimit: "0", newLimit: "300", humanEpoch: "1", recordHash: H("2") } },
     ]);
     s.chain.mine(KEYS.rules.address, [{ name: "LimitTightened", args: { counterparty: C, oldLimit: "0", newLimit: "0", recordHash: H("3") } }]);
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect(await s.store.monitoredSet(s.scope)).toEqual([A, B]);
+  });
+});
+
+describe("fast lane (AD-20 amendment 2026-09-29)", () => {
+  const ms = (n: number) => new Date(T0.getTime() + n);
+
+  async function secondWallet(s: Awaited<ReturnType<typeof setup>>) {
+    const PAY2: Hex = "0x0000000000000000000000000000000000000abc";
+    const WALLET2: Hex = "0x0000000000000000000000000000000000000def";
+    const { binding: b2 } = await s.accounts.onboard({ paymentAddress: PAY2, webhookUrl: "", now: T0 });
+    await s.accounts.setKeys(b2.customerId, KEYS, T0);
+    await s.accounts.bind(b2.customerId, WALLET2, T0);
+    return WALLET2;
+  }
+
+  test("nothing in flight: a fast pass makes no Circle or chain call", async () => {
+    const s = await setup();
+    await secondWallet(s);
+    for (const t of [0, 250, 500, 1000, 2000]) {
+      const r = await s.worker.fastPass(ms(t));
+      expect(r.outbox?.processed).toEqual([]);
+      expect(r.outbox?.polled ?? []).toEqual([]);
+      expect(r.indexer).toBeUndefined();
+    }
+    expect(s.writer.statusCalls).toBe(0);
+    expect(s.chain.latestCalls).toBe(0);
+    expect(s.chain.logCalls).toEqual([]);
+  });
+
+  test("claim every wake; Circle poll and in-flight indexer on their own cadences, only the affected wallet", async () => {
+    const s = await setup();
+    const wallet2 = await secondWallet(s);
+    await s.worker.fastPass(ms(0)); // both cadences start here
+    const r = await s.decide({ target: 100n * USDC, now: ms(100) });
+    const sent = await s.worker.fastPass(ms(250)); // claim + send; poll and index not yet due
+    expect(sent.outbox?.processed).toEqual([expect.objectContaining({ kind: "submitted", fn: "register" })]);
+    expect(sent.outbox?.polled).toBeUndefined();
+    expect(sent.indexer).toBeUndefined();
+    expect(s.writer.statusCalls).toBe(0);
+    expect(s.chain.latestCalls).toBe(0);
+
+    const txHash = s.mineSent();
+    const polled = await s.worker.fastPass(ms(500)); // poll due (500 ms); index not (1000 ms)
+    expect(polled.outbox?.polled).toEqual([{ id: expect.any(String), kind: "tx-hash" }]);
+    expect(s.writer.statusCalls).toBe(1);
+    expect(s.chain.latestCalls).toBe(0);
+    await s.worker.fastPass(ms(750)); // neither due
+    expect(s.writer.statusCalls).toBe(1);
+
+    const indexed = await s.worker.fastPass(ms(1000)); // index due: only WALLET (the one with a write in flight)
+    expect(indexed.indexer?.wallets.map((w) => [w.policyWallet, w.confirmed, w.error])).toEqual([[WALLET, 1, undefined]]);
+    expect(s.chain.latestCalls).toBe(1);
+    expect(new Set(s.chain.logWallets)).toEqual(new Set([WALLET]));
+    expect(s.chain.logWallets).not.toContain(wallet2);
+    expect(await s.store.receipts(s.scope, r.record.id)).toEqual([expect.objectContaining({ status: "confirmed", txHash })]);
+
+    // Confirmed: nothing in flight any more, so later fast passes touch neither Circle nor the chain.
+    for (const t of [1500, 2000, 3000]) await s.worker.fastPass(ms(t));
+    expect(s.writer.statusCalls).toBe(1);
+    expect(s.chain.latestCalls).toBe(1);
+  });
+
+  test("a full tick indexes every bound wallet with one latestBlock read", async () => {
+    const s = await setup();
+    const wallet2 = await secondWallet(s);
+    const r = await s.worker.fullTick(T0);
+    expect(r.indexer?.wallets.map((w) => w.policyWallet).sort()).toEqual([WALLET, wallet2].sort());
+    expect(s.chain.latestCalls).toBe(1);
+    expect(new Set(s.chain.logWallets)).toEqual(new Set([WALLET, wallet2]));
+  });
+});
+
+describe("indexer: catch-up budget and rate-limit cooldown", () => {
+  const ms = (n: number) => new Date(T0.getTime() + n);
+
+  async function secondWallet(s: Awaited<ReturnType<typeof setup>>) {
+    const PAY2: Hex = "0x0000000000000000000000000000000000000abc";
+    const WALLET2: Hex = "0x0000000000000000000000000000000000000def";
+    const { binding: b2 } = await s.accounts.onboard({ paymentAddress: PAY2, webhookUrl: "", now: T0 });
+    await s.accounts.setKeys(b2.customerId, KEYS, T0);
+    await s.accounts.bind(b2.customerId, WALLET2, T0);
+    return WALLET2;
+  }
+
+  test("catch-up reads at most 10 chunks per wallet per tick by default; the next tick continues from the cursor", async () => {
+    const s = await setup();
+    s.chain.deployBlock = 0n;
+    s.chain.head = 30_000n; // blocks 0..29999 (head − 1) to index = 15 chunks of 2000
+    const r1 = await s.worker.fullTick(T0);
+    expect(s.chain.logCalls).toHaveLength(10);
+    expect(r1.indexer?.wallets[0]).toMatchObject({ chunks: 10, nextBlock: 20_000n });
+    s.chain.logCalls = [];
+    const r2 = await s.worker.fullTick(at(5));
+    expect(s.chain.logCalls).toHaveLength(5);
+    expect(r2.indexer?.wallets[0]).toMatchObject({ chunks: 5, nextBlock: 30_000n });
+  });
+
+  test("maxChunksPerTick is configurable", async () => {
+    const s = await setup({ maxChunksPerTick: 3 });
+    s.chain.deployBlock = 0n;
+    s.chain.head = 30_001n;
+    await s.worker.fullTick(T0);
+    expect(s.chain.logCalls).toHaveLength(3);
+    expect(await s.store.cursor(WALLET)).toBe(6000n);
+  });
+
+  test("a rate-limited wallet cools down: skipped (no chain call) until the cooldown passes, then retried; other wallets unaffected", async () => {
+    const s = await setup({ rateLimitCooldownMs: 30_000 });
+    const wallet2 = await secondWallet(s);
+    s.chain.rateLimitWallets.add(WALLET);
+    const r1 = await s.worker.fullTick(T0);
+    const w1 = r1.indexer?.wallets.find((w) => w.policyWallet === WALLET);
+    expect(w1).toMatchObject({ error: expect.stringMatching(/rate limit/), coolingDownUntil: ms(30_000) });
+    expect(r1.indexer?.wallets.find((w) => w.policyWallet === wallet2)?.error).toBeUndefined();
+    expect(await s.store.cursor(WALLET)).toBe(DEPLOY_BLOCK);
+
+    // Within the cooldown: WALLET is reported as cooling down, without an error and without a logs read.
+    s.chain.logWallets = [];
+    const r2 = await s.worker.fullTick(ms(5_000));
+    const w2 = r2.indexer?.wallets.find((w) => w.policyWallet === WALLET);
+    expect(w2).toEqual({ policyWallet: WALLET, scope: s.scope, chunks: 0, confirmed: 0, external: 0, paid: 0, alerts: 0, coolingDownUntil: ms(30_000) });
+    expect(s.chain.logWallets).not.toContain(WALLET);
+    expect(r2.indexer?.wallets.map((w) => w.policyWallet)).toContain(wallet2);
+
+    // The cooldown has passed and the RPC recovered: retried and caught up.
+    s.chain.rateLimitWallets.clear();
+    const r3 = await s.worker.fullTick(ms(30_000));
+    const w3 = r3.indexer?.wallets.find((w) => w.policyWallet === WALLET);
+    expect(w3?.error).toBeUndefined();
+    expect(w3?.coolingDownUntil).toBeUndefined();
+    expect(s.chain.logWallets).toContain(WALLET);
+    expect(await s.store.cursor(WALLET)).toBe(s.chain.head);
+  });
+
+  test("still rate-limited after the cooldown: a new cooldown starts (the error is reported once per cooldown)", async () => {
+    const s = await setup({ rateLimitCooldownMs: 10_000 });
+    s.chain.rateLimitWallets.add(WALLET);
+    const errors = async (t: number) => (await s.worker.fullTick(ms(t))).indexer?.wallets[0];
+    expect(await errors(0)).toMatchObject({ error: expect.any(String), coolingDownUntil: ms(10_000) });
+    expect((await errors(5_000))?.error).toBeUndefined();
+    expect(await errors(10_000)).toMatchObject({ error: expect.any(String), coolingDownUntil: ms(20_000) });
+  });
+
+  test("a rate-limited latestBlock read cools down every wallet in the pass; with all cooling down, no chain call", async () => {
+    const s = await setup({ rateLimitCooldownMs: 30_000 });
+    await secondWallet(s);
+    s.chain.rateLimitLatest = true;
+    const r1 = await s.worker.fullTick(T0);
+    expect(r1.indexer?.wallets.map((w) => w.coolingDownUntil)).toEqual([ms(30_000), ms(30_000)]);
+    s.chain.rateLimitLatest = false;
+    const calls = s.chain.latestCalls;
+    await s.worker.fullTick(ms(5_000));
+    expect(s.chain.latestCalls).toBe(calls);
+  });
+
+  test("a non-rate-limit error starts no cooldown: the wallet is retried on the next tick", async () => {
+    const s = await setup();
+    s.chain.failWallets.add(WALLET);
+    const r1 = await s.worker.fullTick(T0);
+    expect(r1.indexer?.wallets[0]).toMatchObject({ error: "rpc down" });
+    expect(r1.indexer?.wallets[0]?.coolingDownUntil).toBeUndefined();
+    s.chain.failWallets.clear();
+    s.chain.logWallets = [];
+    const r2 = await s.worker.fullTick(ms(5_000));
+    expect(r2.indexer?.wallets[0]?.error).toBeUndefined();
+    expect(s.chain.logWallets).toContain(WALLET);
+    expect(await s.store.cursor(WALLET)).toBe(s.chain.head);
+  });
+
+  test("the in-flight (fast-lane) indexer honours a cooldown started by the full tick, and vice versa", async () => {
+    const s = await setup({ rateLimitCooldownMs: 30_000 });
+    await s.decide({ target: 100n * USDC });
+    s.chain.rateLimitWallets.add(WALLET);
+    await s.worker.fullTick(T0); // sends the write, then the indexer is rate-limited
+    s.mineSent();
+    s.chain.rateLimitWallets.clear();
+    const latest = s.chain.latestCalls;
+    s.chain.logWallets = [];
+    const fast = await s.worker.fastPass(ms(1_000));
+    expect(fast.indexer?.wallets).toEqual([expect.objectContaining({ policyWallet: WALLET, chunks: 0, coolingDownUntil: ms(30_000) })]);
+    expect(fast.indexer?.wallets[0]?.error).toBeUndefined();
+    expect(s.chain.latestCalls).toBe(latest);
+    expect(s.chain.logWallets).toEqual([]);
+
+    // After the cooldown the fast lane indexes the wallet and confirms the write.
+    const after = await s.worker.fastPass(ms(30_000));
+    expect(after.indexer?.wallets.map((w) => [w.policyWallet, w.confirmed, w.error, w.coolingDownUntil])).toEqual([[WALLET, 1, undefined, undefined]]);
+
+    // A rate limit hit in the fast lane also makes the full tick skip the wallet.
+    s.chain.rateLimitWallets.add(WALLET);
+    await s.decide({ target: 50n * USDC, now: ms(30_500) });
+    await s.worker.fastPass(ms(30_500)); // sends the tighten
+    s.mineSent(1);
+    const hit = await s.worker.fastPass(ms(31_500));
+    expect(hit.indexer?.wallets[0]).toMatchObject({ error: expect.stringMatching(/rate limit/), coolingDownUntil: ms(61_500) });
+    s.chain.logWallets = [];
+    const full = await s.worker.fullTick(ms(40_000));
+    expect(full.indexer?.wallets[0]).toMatchObject({ chunks: 0, coolingDownUntil: ms(61_500) });
+    expect(s.chain.logWallets).toEqual([]);
   });
 });

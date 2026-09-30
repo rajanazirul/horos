@@ -84,7 +84,7 @@ export {
   type ChainConfig,
 } from "./chain/config.js";
 export { circleCall, encodeCall, type EncodedCall } from "./chain/calls.js";
-export { ViemChainReader, revertName, type ViemChainReaderOptions } from "./chain/viem-reader.js";
+export { isRateLimited, ViemChainReader, revertName, type ViemChainReaderOptions } from "./chain/viem-reader.js";
 export { cachedChainReader, type CachedChainReaderOptions } from "./chain/cached-reader.js";
 export { LocalKeyChainWriter, localKeyProvisioner, type LocalKeyChainWriterOptions } from "./chain/local-writer.js";
 export { recoverAccountSigner, recoverCheckSigner, type AccountTypedMessage } from "./chain/typed-data.js";
@@ -116,3 +116,35 @@ export {
   type EnvResult,
   type RawEnv,
 } from "./env.js";
+export {
+  newShadowApiKey,
+  PostgresShadowStore,
+  SHADOW_WINDOW_POLICY,
+  shadowKeyHash,
+  windowPolicyForPreset,
+  type PostgresShadowStoreOptions,
+  type ShadowKeyOwner,
+  type ShadowLedgerEffect,
+  type ShadowSignupResult,
+} from "./postgres/shadow-store.js";
+export {
+  DayIndexOverflowError,
+  dayIndexAt,
+  dayIndexOf,
+  MAX_WINDOW_DAYS,
+  record as recordRollingWindow,
+  recordSlot,
+  remainingView,
+  RING_SIZE,
+  satSub,
+  slotIndexOf,
+  UINT224_MAX,
+  UNKNOWN_COUNTERPARTY,
+  windowSum,
+  type CounterpartyWindowState,
+  type RemainingView,
+  type Ring,
+  type Slot,
+  type WindowPolicy,
+  type WindowRings,
+} from "./shadow/rolling-window.js";

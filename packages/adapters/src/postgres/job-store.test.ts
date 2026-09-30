@@ -1,10 +1,9 @@
-import type { PGlite } from "@electric-sql/pglite";
 import { afterEach, describe, expect, test } from "vitest";
 import { PostgresJobStore } from "./job-store.js";
 import { job } from "./schema.js";
-import { freshDb } from "./test-db.js";
+import { freshDb, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
@@ -80,7 +79,7 @@ describe("PostgresJobStore", () => {
     const a = await jobs.claimJob("ofac-poll", { now: T0 });
     const b = await jobs.claimJob("ofac-poll", { now: T0 });
     expect([a?.window, b?.window]).toEqual(["w1", "w2"]);
-    // PGlite is single-connection, so lock contention itself is not observable here; assert the clause.
+    // The test client is one connection, so lock contention itself is not observable here; assert the clause.
     const q = db.select().from(job).for("update", { skipLocked: true }).toSQL();
     expect(q.sql).toMatch(/for update skip locked/i);
   });

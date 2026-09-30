@@ -8,6 +8,7 @@ export * from "./check.js";
 export * from "./errors.js";
 export * from "./eip712.js";
 export * from "./account.js";
+export * from "./shadow.js";
 export * from "./record.js";
 export * from "./read.js";
 export * from "./policy.js";

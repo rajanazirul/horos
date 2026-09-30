@@ -5,6 +5,8 @@
 //   GET /v1/scopes/:scope/counterparties/:address
 // Access, first that applies: the configured public demo Scope (no auth); an `x-horos-api-key` resolved to a
 // shadow Scope; a "Horos Account" ReadAccess signed by the wallet's live Payment key. No route here writes.
+// Story 3.4: GET /v1/scopes/:scope/shadow-summary (same access) counts a shadow Scope's Decisions as "advisory" or
+// "would-have-caught".
 // Logs carry the scope and route only: never records, Declared Identity, keys or signatures.
 import { recoverAccountSigner } from "@horos/adapters";
 import { foldStatus, type AccountStore, type ChainReader, type ReadMirror, type ReadReceipt, type ReadStore, type StatusChain } from "@horos/core";
@@ -12,6 +14,7 @@ import {
   accountDomain,
   accountExpiryValid,
   Address,
+  API_KEY_HEADER,
   HexSignature,
   READ_ACCESS_HEADERS,
   READ_PAGE_MAX,
@@ -25,12 +28,13 @@ import {
   type Hex,
   type RecordDetail,
   type RecordPage,
+  type ShadowSummary,
   type WriteReceiptView,
 } from "@horos/schema";
 import type { Context, Hono } from "hono";
 import { fail } from "./http.js";
 
-export const API_KEY_HEADER = "x-horos-api-key";
+export { API_KEY_HEADER };
 
 export interface ReadDeps {
   readonly reads: ReadStore;
@@ -43,6 +47,8 @@ export interface ReadDeps {
   readonly publicDemoScope?: string;
   /** Maps a shadow API key to its shadow Scope, or undefined when unknown. Absent: API keys are refused. */
   readonly resolveShadowKey?: (key: string) => Promise<string | undefined>;
+  /** A shadow Scope's outcome counts (Story 3.4). The summary route is mounted only when set. */
+  readonly shadowSummary?: (scope: string) => Promise<ShadowSummary>;
   readonly log?: (entry: Record<string, unknown>) => void;
 }
 
@@ -222,8 +228,19 @@ export function registerReadRoutes(app: Hono, deps: ReadDeps): void {
     return c.json(statusView(address.data, inputs.entries, chain) satisfies CounterpartyStatusView, 200);
   });
 
+  const shadowSummary = deps.shadowSummary;
+  if (shadowSummary !== undefined) {
+    app.get("/v1/scopes/:scope/shadow-summary", async (c) => {
+      const g = await guard(c, "shadow-summary");
+      if ("res" in g) return g.res;
+      if (!g.scope.startsWith("shadow:")) return fail(c, "not_found", "a summary exists only for a shadow scope");
+      return c.json((await shadowSummary(g.scope)) satisfies ShadowSummary, 200);
+    });
+  }
+
   // Read-only: any other method on these paths is refused and writes nothing.
   const readPaths = [
+    "/v1/scopes/:scope/shadow-summary",
     "/v1/scopes/:scope/records",
     "/v1/scopes/:scope/records/:id",
     "/v1/scopes/:scope/counterparties",

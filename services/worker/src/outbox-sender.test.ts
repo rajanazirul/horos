@@ -1,4 +1,4 @@
-import type { PGlite } from "@electric-sql/pglite";
+import { freshDb, type TestClient } from "@horos/adapters/testing";
 import {
   deterministicUuid,
   outboxExtraWrites,
@@ -33,9 +33,7 @@ import {
   type WriteStatus,
 } from "@horos/core";
 import { DecisionRecord, recordHash, toWireTime, type Hex, type Scope } from "@horos/schema";
-import { drizzle } from "drizzle-orm/pglite";
-import { migratedClient, migratedDump } from "./migrated-db.test-helpers.js";
-import { afterEach, beforeAll, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { createWorker } from "./tick.js";
 
 const USDC = 1_000_000n;
@@ -142,20 +140,14 @@ class RecordingNotifier implements Notifier {
 
 const noFetch: FetchSdn = async () => ({ status: 304 });
 
-// Migrate once for the file, outside any single test's timeout.
-beforeAll(async () => {
-  await migratedDump();
-});
-
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
 
 async function setup(opts: { lists?: ListSnapshot[] } = {}) {
-  const client = await migratedClient();
+  const { client, db } = await freshDb();
   clients.push(client);
-  const db = drizzle(client);
   const accounts = new PostgresAccountStore(db);
   const records = new PostgresRecordStore(db);
   const outbox = new PostgresOutboxStore(db);
@@ -248,8 +240,8 @@ describe("outbox sender", () => {
     const [r500, r100] = await Promise.all([s.decide({ target: 500n * USDC }), s.decide({ target: 100n * USDC })]);
     const first = r500.record.seq < r100.record.seq ? r500 : r100;
     const second = first === r500 ? r100 : r500;
-    await s.worker.tick(T0);
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(T0);
+    await s.worker.fullTick(at(1));
     expect(s.writer.sent).toHaveLength(1);
     expect(s.writer.sent[0]).toMatchObject({
       policyWallet: WALLET,
@@ -267,9 +259,9 @@ describe("outbox sender", () => {
   test("COMPLETE stores the tx hash and stays submitted; nothing is ever confirmed here", async () => {
     const s = await setup();
     await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     s.writer.statusResult = { state: "complete", txHash: `0x${"e".repeat(64)}` };
-    const r = await s.worker.tick(at(1));
+    const r = await s.worker.fullTick(at(1));
     expect(r.outbox?.polled).toEqual([expect.objectContaining({ kind: "tx-hash" })]);
     const [intent] = await s.outbox.list(s.scope, A);
     expect(intent).toMatchObject({ status: "submitted", txHash: `0x${"e".repeat(64)}` });
@@ -278,10 +270,10 @@ describe("outbox sender", () => {
   test("in-flight: a new decision opens a new pending row, not sent until the write in flight is mined", async () => {
     const s = await setup();
     await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     s.reader.views.set(A, registered(100n * USDC));
     await s.decide({ target: 40n * USDC, view: registered(100n * USDC), now: at(1) });
-    await s.worker.tick(at(2));
+    await s.worker.fullTick(at(2));
     expect(s.writer.sent).toHaveLength(1);
     const rows = await s.outbox.list(s.scope, A);
     expect(rows.map((r) => [r.status, r.laneRole])).toEqual([
@@ -289,26 +281,26 @@ describe("outbox sender", () => {
       ["pending", "rules"],
     ]);
     s.writer.statusResult = { state: "complete", txHash: `0x${"e".repeat(64)}` };
-    await s.worker.tick(at(3));
+    await s.worker.fullTick(at(3));
     expect(s.writer.sent.map((w) => w.call.fn)).toEqual(["register", "tighten"]);
   });
 
   test("in-flight on the same lane: sent only once the first write has its tx hash", async () => {
     const s = await setup();
     await upsertIntent(s.db, intentRow(s.scope, { target: 10n, recordId: RID(1) }), uuidv7(T0.getTime()));
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     await upsertIntent(s.db, intentRow(s.scope, { target: 5n, recordId: RID(2), counterparty: B }), uuidv7(T0.getTime()));
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     expect(s.writer.sent).toHaveLength(1);
     s.writer.statusResult = { state: "complete", txHash: `0x${"e".repeat(64)}` };
-    await s.worker.tick(at(2));
+    await s.worker.fullTick(at(2));
     expect(s.writer.sent.map((r) => r.call.counterparty)).toEqual([A, B]);
   });
 
   test("FCC clamp: unregistered, target 900, live FCC 500 → register(a, 500)", async () => {
     const s = await setup();
     await upsertIntent(s.db, intentRow(s.scope, { target: 900n * USDC, recordId: RID(1) }), uuidv7(T0.getTime()));
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect(s.writer.sent[0]?.call).toMatchObject({ fn: "register", limit: 500n * USDC });
   });
 
@@ -316,7 +308,7 @@ describe("outbox sender", () => {
     const s = await setup();
     s.reader.views.set(A, registered(100n * USDC));
     const r = await s.decide({ target: 100n * USDC, view: registered(200n * USDC) });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect(s.writer.sent).toHaveLength(0);
     expect((await s.outbox.list(s.scope, A))[0]?.status).toBe("noop");
     expect(await s.outbox.intentState(s.scope, A, r.record.id)).toBe("none");
@@ -326,7 +318,7 @@ describe("outbox sender", () => {
     const s = await setup();
     s.reader.views.set(A, registered(200n * USDC, 3n));
     await s.decide({ target: 50n * USDC, view: registered(200n * USDC, 3n) });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect(s.writer.sent[0]).toMatchObject({
       call: { fn: "tighten", limit: 50n * USDC, expectedEpoch: 3n },
       signer: { address: KEYS.rules.address, circleWalletId: "w-rules" },
@@ -338,7 +330,7 @@ describe("outbox sender", () => {
     const r = await s.decide({ target: 100n * USDC });
     s.setLists([sdn([[A, ["EXAMPLE SANCTIONED ENTITY"]]])]);
     s.reader.simulateResult = { ok: false, revert: "AlreadyRegistered" }; // hold the follow-up pin back this tick
-    const report = await s.worker.tick(T0);
+    const report = await s.worker.fullTick(T0);
     expect(report.outbox?.processed.map((p) => p.kind)).toEqual(["hard-rule", "retry"]);
     expect(s.writer.sent).toHaveLength(0);
     s.reader.simulateResult = { ok: true };
@@ -356,7 +348,7 @@ describe("outbox sender", () => {
     const pinIntent = intents.find((i) => i.pin);
     expect(pinIntent).toMatchObject({ createdByRecord: block?.id, sendRecordHash: chain[1]?.recordHash, laneRole: "rules" });
     expect(await s.outbox.intentState(s.scope, A, r.record.id)).toBe("failed");
-    await s.worker.tick(at(60));
+    await s.worker.fullTick(at(60));
     expect(s.writer.sent.map((w) => w.call)).toEqual([{ fn: "pin", counterparty: A, recordHash: chain[1]?.recordHash }]);
   });
 
@@ -364,8 +356,8 @@ describe("outbox sender", () => {
     const s = await setup();
     const r = await s.decide({ target: 100n * USDC });
     s.reader.simulateResult = { ok: false, revert };
-    await s.worker.tick(T0);
-    await s.worker.tick(at(3600));
+    await s.worker.fullTick(T0);
+    await s.worker.fullTick(at(3600));
     expect(s.writer.sent).toHaveLength(0);
     const chain = await s.records.readChain(s.scope);
     expect(chain).toHaveLength(2);
@@ -379,7 +371,7 @@ describe("outbox sender", () => {
     const s = await setup();
     await s.decide({ target: 100n * USDC });
     s.reader.simulateResult = { ok: false, revert: "AlreadyRegistered" };
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect((await s.outbox.list(s.scope, A))[0]).toMatchObject({ status: "pending", attempts: 1 });
     expect(await s.records.readChain(s.scope)).toHaveLength(1);
   });
@@ -387,9 +379,9 @@ describe("outbox sender", () => {
   test("Circle DENIED after submission: terminal", async () => {
     const s = await setup();
     const r = await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     s.writer.statusResult = { state: "denied", error: "DENIED" };
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     const chain = await s.records.readChain(s.scope);
     expect(chain.map((c) => DecisionRecord.parse(c.record).decision)).toEqual([DecisionRecord.parse(r.record).decision, "hold"]);
     expect(await s.outbox.intentState(s.scope, A, r.record.id)).toBe("failed");
@@ -399,21 +391,21 @@ describe("outbox sender", () => {
     const s = await setup();
     await s.decide({ target: 100n * USDC });
     s.writer.failSends = 2;
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect((await s.outbox.list(s.scope, A))[0]).toMatchObject({ status: "pending", attempts: 1, nextAttemptAt: at(30) });
-    await s.worker.tick(at(10));
+    await s.worker.fullTick(at(10));
     expect((await s.outbox.list(s.scope, A))[0]?.attempts).toBe(1);
-    await s.worker.tick(at(30));
+    await s.worker.fullTick(at(30));
     expect((await s.outbox.list(s.scope, A))[0]).toMatchObject({ attempts: 2, nextAttemptAt: at(90) });
     expect(s.notifier.alerts).toHaveLength(0);
-    await s.worker.tick(at(90));
+    await s.worker.fullTick(at(90));
     expect((await s.outbox.list(s.scope, A))[0]).toMatchObject({ status: "submitted" });
     s.writer.statusResult = { state: "failed", error: "FAILED" };
-    await s.worker.tick(at(91));
+    await s.worker.fullTick(at(91));
     expect((await s.outbox.list(s.scope, A))[0]).toMatchObject({ status: "pending", attempts: 3, alerted: true, nextAttemptAt: at(91 + 120) });
     expect(s.notifier.alerts).toEqual([expect.objectContaining({ kind: "outbox-retry-exhausted", scope: s.scope, counterparty: A })]);
     s.writer.failSends = 1;
-    await s.worker.tick(at(300));
+    await s.worker.fullTick(at(300));
     expect((await s.outbox.list(s.scope, A))[0]).toMatchObject({ status: "pending", attempts: 4 });
     expect(s.notifier.alerts).toHaveLength(1);
     expect(await s.records.readChain(s.scope)).toHaveLength(1);
@@ -424,10 +416,10 @@ describe("outbox sender: review fixes", () => {
   test("submitted + newer pending row, then Circle FAILED: merged into one pending row holding both record sets", async () => {
     const s = await setup();
     const r1 = await s.decide({ target: 100n * USDC });
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     const r2 = await s.decide({ target: 60n * USDC, now: at(1) });
     s.writer.statusResult = { state: "failed", error: "FAILED" };
-    const report = await s.worker.tick(at(2));
+    const report = await s.worker.fullTick(at(2));
     expect(report.outbox?.polled).toEqual([expect.objectContaining({ kind: "retry" })]);
     // The merged row is due at once, so the same pass claims and sends it.
     expect(report.outbox?.processed).toEqual([expect.objectContaining({ kind: "submitted", fn: "register" })]);
@@ -452,7 +444,7 @@ describe("outbox sender: review fixes", () => {
       s.writer.beforeSend = undefined;
       r2 = await s.decide({ target: 40n * USDC, now: at(1) });
     };
-    const report = await s.worker.tick(at(2));
+    const report = await s.worker.fullTick(at(2));
     expect(report.outbox?.processed.map((p) => p.kind)).toEqual(["retry", "submitted"]);
     const rows = await s.outbox.list(s.scope, A);
     expect(rows.map((r) => r.status).sort()).toEqual(["noop", "submitted"]);
@@ -467,10 +459,10 @@ describe("outbox sender: review fixes", () => {
     const s = await setup({ lists: listed });
     const r = await s.decide({ target: 100n * USDC, lists: listed });
     expect(DecisionRecord.parse(r.record).decision).toBe("block");
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     expect(s.writer.sent[0]?.call).toEqual({ fn: "pin", counterparty: A, recordHash: r.recordHash });
     s.writer.statusResult = { state: "denied", error: "DENIED" };
-    await s.worker.tick(at(1));
+    await s.worker.fullTick(at(1));
     const chain = await s.records.readChain(s.scope);
     expect(chain.map((c) => DecisionRecord.parse(c.record).decision)).toEqual(["block", "block"]);
     expect(chain[1]?.record.reason).toContain("(CircleDenied)");
@@ -484,7 +476,7 @@ describe("outbox sender: review fixes", () => {
     const s = await setup();
     await s.decide({ target: 100n * USDC });
     s.setLists(lists);
-    const report = await s.worker.tick(T0);
+    const report = await s.worker.fullTick(T0);
     expect(report.outbox?.processed).toEqual([expect.objectContaining({ kind: "retry", error: "sanctions list stale" })]);
     expect(s.writer.sent).toHaveLength(0);
     expect((await s.outbox.list(s.scope, A))[0]).toMatchObject({ status: "pending", lastError: "sanctions list stale" });
@@ -495,7 +487,7 @@ describe("outbox sender: review fixes", () => {
     await s.decide({ target: 100n * USDC });
     s.writer.failSends = 1;
     s.writer.failMessage = "HTTP request failed. URL: https://rpc.example.com/v2/SECRETKEY?x=1";
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     const row = (await s.outbox.list(s.scope, A))[0];
     expect(row?.lastError).toBe("send failed: HTTP request failed. URL: https://rpc.example.com");
   });
@@ -503,7 +495,7 @@ describe("outbox sender: review fixes", () => {
   test("the idempotency key is seeded with intent id, attempts, target, pin and send_record_hash", async () => {
     const s = await setup();
     await upsertIntent(s.db, intentRow(s.scope, { target: 10n, recordId: RID(1) }), uuidv7(T0.getTime()));
-    await s.worker.tick(T0);
+    await s.worker.fullTick(T0);
     const [row] = await s.outbox.list(s.scope, A);
     expect(s.writer.sent[0]?.idempotencyKey).toBe(
       deterministicUuid(`horos:outbox:${row?.id}:0:10:false:${"0x" + "1".repeat(64)}`),
@@ -513,9 +505,8 @@ describe("outbox sender: review fixes", () => {
 
 describe("provisioning job", () => {
   test("onboard → tick provisions keys once; a failing provisioner is retried next tick", async () => {
-    const client = await migratedClient();
+    const { client, db } = await freshDb();
     clients.push(client);
-    const db = drizzle(client);
     const accounts = new PostgresAccountStore(db);
     const jobs = new PostgresJobStore(db);
     let fail = 1;
@@ -536,12 +527,12 @@ describe("provisioning job", () => {
       provisioning: { accounts, provisioner },
     });
     const { binding } = await accounts.onboard({ paymentAddress: PAY, webhookUrl: "", now: T0 });
-    const r1 = await worker.tick(T0);
+    const r1 = await worker.fullTick(T0);
     expect(r1.provision?.failed).toEqual([{ customerId: binding.customerId, error: "circle 500" }]);
-    const r2 = await worker.tick(at(1));
+    const r2 = await worker.fullTick(at(1));
     expect(r2.provision?.provisioned).toEqual([binding.customerId]);
     expect((await accounts.bindingByPayment(PAY))?.keys).toEqual(KEYS);
-    await worker.tick(at(2));
+    await worker.fullTick(at(2));
     expect(calls).toBe(2);
   });
 });

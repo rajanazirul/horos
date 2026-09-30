@@ -1,11 +1,10 @@
-import type { PGlite } from "@electric-sql/pglite";
 import { afterEach, describe, expect, test } from "vitest";
 import { uuidv7 } from "../ids.js";
 import { buildSnapshotContent } from "../lists/snapshot.js";
 import { PostgresListStore } from "./list-store.js";
-import { freshDb } from "./test-db.js";
+import { freshDb, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });

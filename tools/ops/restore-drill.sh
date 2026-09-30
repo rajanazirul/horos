@@ -8,7 +8,7 @@
 #   tools/ops/restore-drill.sh /path/to/horos-YYYY-MM-DD.dump
 #
 # Needs Docker, Node >= 24 and the built workspace (`pnpm install && pnpm turbo run build`). Touches no other
-# container and never the hosted database. PG_IMAGE (default postgres:17) must be >= the dump's server version.
+# container and never the hosted database. PG_IMAGE (default postgres:18, the hosted server's major version) must be >= the dump's server version.
 set -euo pipefail
 
 dump="${1:-}"
@@ -29,7 +29,7 @@ if [[ -f "$dump.sha256" ]]; then
   [[ "$expected" == "$actual" ]] || { echo "restore-drill: $dump does not match $dump.sha256" >&2; exit 1; }
   echo "restore-drill: checksum ok"
 fi
-PG_IMAGE="${PG_IMAGE:-postgres:17}"
+PG_IMAGE="${PG_IMAGE:-postgres:18}"
 name="horos-restore-drill-$(date -u +%Y%m%d%H%M%S)-$$-$RANDOM"
 password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" # throwaway, this container only
 

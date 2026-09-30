@@ -7,6 +7,7 @@ export {
   OFAC_POLL_JOB,
   createWorker,
   ofacWindow,
+  type FastPassReport,
   type OfacTickReport,
   type TickReport,
   type Worker,
@@ -22,9 +23,13 @@ export {
 } from "./outbox-sender.js";
 export {
   createIndexer,
+  DEFAULT_MAX_CHUNKS_PER_TICK,
+  DEFAULT_RATE_LIMIT_COOLDOWN_MS,
   findDeployBlock,
   runIndexer,
+  runInflightIndexer,
   UNRECOGNISED_WRITE_ALERT_JOB,
+  type Indexer,
   type IndexerDeps,
   type IndexerReport,
   type WalletIndexReport,

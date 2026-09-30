@@ -92,15 +92,21 @@ export class PostgresAccountStore implements AccountStore {
     const paymentAddress = Address.parse(input.paymentAddress);
     const nowMs = input.now.getTime();
     const created = await this.db.transaction(async (tx) => {
-      const customerId = this.newId(nowMs);
-      const inserted = await tx
+      await tx
         .insert(customer)
-        .values({ id: customerId, paymentAddress, createdAt: input.now })
-        .onConflictDoNothing({ target: customer.paymentAddress })
-        .returning({ id: customer.id });
-      if (inserted.length === 0) return false;
+        .values({ id: this.newId(nowMs), paymentAddress, createdAt: input.now })
+        .onConflictDoNothing({ target: customer.paymentAddress });
+      const found = await tx.select({ id: customer.id }).from(customer).where(eq(customer.paymentAddress, paymentAddress)).limit(1);
+      const customerId = found[0]?.id;
+      if (customerId === undefined) throw new Error("customer row missing after insert");
+      // A Customer created by Shadow Mode sign-up (Story 3.4) has no binding yet: its first onboarding creates it.
+      const bound = await tx
+        .insert(enforcedBinding)
+        .values({ customerId, scopeId: `enforced:${this.newId(nowMs)}`, status: "pending", updatedAt: input.now })
+        .onConflictDoNothing({ target: enforcedBinding.customerId })
+        .returning({ customerId: enforcedBinding.customerId });
+      if (bound.length === 0) return false;
       await tx.insert(customerWebhook).values({ id: this.newId(nowMs), customerId, url: input.webhookUrl, createdAt: input.now });
-      await tx.insert(enforcedBinding).values({ customerId, scopeId: `enforced:${this.newId(nowMs)}`, status: "pending", updatedAt: input.now });
       await tx
         .insert(job)
         .values({ kind: PROVISION_KEYS_JOB, window: customerId, status: "pending", attempts: 0, updatedAt: input.now })

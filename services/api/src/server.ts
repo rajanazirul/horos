@@ -19,6 +19,7 @@ import {
   PostgresAccountStore,
   PostgresPolicyVersionStore,
   PostgresReadStore,
+  PostgresShadowStore,
   pingPostgres,
   appliedMigrationCount,
   bundledMigrationCount,
@@ -68,6 +69,8 @@ export function buildApiApp(env: ApiEnv, rt: ApiRuntime): Hono {
   // of Checks does not re-read them; `remaining` stays live (AD-3). Signed-Check auth compares the signer against
   // the cached Payment role holder, so a Payment-key rotation takes effect within that TTL.
   const checkReader = cachedChainReader(rt.chainReader, { ttlMs: env.CHAIN_READ_CACHE_MS });
+  // Shadow Mode (Story 3.4): one store serves sign-up, API-key reads (`resolveShadowKey`) and the Check's virtual ledger.
+  const shadow = new PostgresShadowStore(rt.db);
   const app = createApp({
     policyVersions: new PostgresPolicyVersionStore(rt.db),
     adminToken: env.ADMIN_TOKEN,
@@ -78,9 +81,11 @@ export function buildApiApp(env: ApiEnv, rt: ApiRuntime): Hono {
     chainId: env.CHAIN_ID,
     reads: new PostgresReadStore(rt.db),
     ...(env.PUBLIC_DEMO_SCOPE === undefined ? {} : { publicDemoScope: env.PUBLIC_DEMO_SCOPE }),
+    shadow,
+    resolveShadowKey: async (key) => (await shadow.resolveKey(key))?.scope,
     log,
     logError: (entry) => rt.log.error(entry),
-    check: postgresCheckDeps(rt.db, { chainReader: checkReader, chainId: env.CHAIN_ID, now, log }),
+    check: postgresCheckDeps(rt.db, { chainReader: checkReader, chainId: env.CHAIN_ID, now, log, ledger: shadow }),
     ...(env.CHECK_RATE_PER_MINUTE === undefined ? {} : { checkRatePerMinute: env.CHECK_RATE_PER_MINUTE }),
     remoteAddress: (c) => {
       try {

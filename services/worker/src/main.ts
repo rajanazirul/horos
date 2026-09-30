@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // The worker entry point (Story 2.10; AD-8, AD-15, AD-20, AD-24). Thin wiring only: validate the environment,
 // build the job, list, record, outbox and indexer stores, the OFAC fetcher, the founder-alert webhook, key
-// provisioning, the chain reader and writer, and load the Horos Demo List; then call `tick(now)` every
-// TICK_INTERVAL_MS. Ticks never overlap (the next one starts only after the previous one finished and the rest of
-// the interval elapsed). Each tick logs one structured JSON summary. SIGTERM/SIGINT stop the loop after the current
-// tick, then the pool closes. A tick running past MAX_TICK_MS is logged, alerted and exits 1 (Railway restarts on
-// failure). Runs as a single replica (one serialized lane per signing key).
+// provisioning, the chain reader and writer, and load the Horos Demo List; then run one sequential loop (AD-20,
+// amended 2026-09-29) that wakes every FAST_TICK_MS and runs `fullTick(now)` when TICK_INTERVAL_MS has elapsed since
+// the last full tick, otherwise `fastPass(now)`. Passes never overlap (the next one starts only after the previous
+// one finished and the rest of the wake interval elapsed). Each full tick, and each fast pass that did something,
+// logs one structured JSON summary. SIGTERM/SIGINT stop the loop after the current pass, then the pool closes. A
+// pass running past MAX_TICK_MS is logged, alerted and exits 1 (Railway restarts on failure). Runs as a single
+// replica (one serialized lane per signing key, AD-8).
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
@@ -40,7 +42,8 @@ import {
 } from "@horos/adapters";
 import type { ChainReader, ChainWriter, KeyProvisioner, Notifier } from "@horos/core";
 import { parseWorkerEnv, type WorkerEnv } from "./env.js";
-import { createWorker, type TickReport, type Worker } from "./tick.js";
+import type { IndexerDeps, WalletIndexReport } from "./indexer.js";
+import { createWorker, type FastPassReport, type TickReport, type Worker, type WorkerDeps } from "./tick.js";
 
 export interface WorkerRuntime {
   readonly db: HorosDb;
@@ -84,7 +87,11 @@ export function vendorRuntime(env: WorkerEnv): Omit<WorkerRuntime, "db"> {
 }
 
 /** Wire `createWorker` with every job: OFAC poll, key provisioning, the outbox sender and the indexer. */
-export function buildWorker(rt: WorkerRuntime): Worker {
+export function buildWorker(
+  rt: WorkerRuntime,
+  cadences?: WorkerDeps["cadences"],
+  indexerLimits?: Pick<IndexerDeps, "maxChunksPerTick" | "rateLimitCooldownMs">,
+): Worker {
   const { db, reader, writer, notifier } = rt;
   const jobs = new PostgresJobStore(db);
   const lists = new PostgresListStore(db);
@@ -107,7 +114,8 @@ export function buildWorker(rt: WorkerRuntime): Worker {
       loadLists: () => loadActiveListSnapshots(lists),
       newId: uuidv7,
     },
-    indexer: { store: new PostgresIndexerStore(db), jobs, records, reader, notifier, newId: uuidv7 },
+    indexer: { store: new PostgresIndexerStore(db), jobs, records, reader, notifier, newId: uuidv7, ...indexerLimits },
+    ...(cadences === undefined ? {} : { cadences }),
   });
 }
 
@@ -143,6 +151,7 @@ export function summarizeTick(report: TickReport, durationMs: number): Record<st
             external: report.indexer.wallets.reduce((n, w) => n + w.external, 0),
             paid: report.indexer.wallets.reduce((n, w) => n + w.paid, 0),
             errors: report.indexer.wallets.flatMap((w) => (w.error === undefined ? [] : [w.error])),
+            ...coolingDown(report.indexer.wallets),
             reconciled: report.indexer.reconciled,
             ...(report.indexer.reconcileError === undefined ? {} : { reconcileError: report.indexer.reconcileError }),
             alertsDelivered: report.indexer.alertsDelivered.length,
@@ -152,10 +161,52 @@ export function summarizeTick(report: TickReport, durationMs: number): Record<st
   };
 }
 
+/** Wallets cooling down after a rate limit (the error is in `errors` only on the pass that started the cooldown). */
+function coolingDown(wallets: readonly WalletIndexReport[]): { coolingDown?: number } {
+  const n = wallets.filter((w) => w.coolingDownUntil !== undefined).length;
+  return n === 0 ? {} : { coolingDown: n };
+}
+
+/** A wallet the pass skipped because it is cooling down (no chain call). */
+const skipped = (w: WalletIndexReport) => w.coolingDownUntil !== undefined && w.error === undefined;
+
+/** A secret-free, count-level summary of one fast pass, or undefined when it did nothing (not logged). */
+export function summarizeFastPass(report: FastPassReport, durationMs: number): Record<string, unknown> | undefined {
+  const polled = report.outbox?.polled ?? [];
+  const processed = report.outbox?.processed ?? [];
+  // A pass that only skipped cooling-down wallets did nothing (not logged every in-flight index pass).
+  const wallets = (report.indexer?.wallets ?? []).filter((w) => !skipped(w));
+  if (polled.length === 0 && processed.length === 0 && wallets.length === 0) return undefined;
+  const count = <T extends { kind: string }>(xs: readonly T[]) => {
+    const out: Record<string, number> = {};
+    for (const x of xs) out[x.kind] = (out[x.kind] ?? 0) + 1;
+    return out;
+  };
+  return {
+    event: "fast-pass",
+    durationMs,
+    ...(polled.length === 0 && processed.length === 0 ? {} : { outbox: { polled: count(polled), processed: count(processed) } }),
+    ...(wallets.length === 0
+      ? {}
+      : {
+          indexer: {
+            wallets: wallets.length,
+            confirmed: wallets.reduce((n, w) => n + w.confirmed, 0),
+            errors: wallets.flatMap((w) => (w.error === undefined ? [] : [w.error])),
+            ...coolingDown(wallets),
+          },
+        }),
+  };
+}
+
 export interface LoopOptions {
-  readonly tick: (now: Date) => Promise<TickReport>;
-  readonly intervalMs: number;
-  /** A tick still running after this long is presumed hung (an RPC, Circle or webhook call without a timeout). */
+  readonly fullTick: (now: Date) => Promise<TickReport>;
+  readonly fastPass: (now: Date) => Promise<FastPassReport>;
+  /** The wake interval (FAST_TICK_MS). */
+  readonly fastIntervalMs: number;
+  /** A wake at least this long after the last full tick's start runs a full tick (TICK_INTERVAL_MS). */
+  readonly fullIntervalMs: number;
+  /** A pass still running after this long is presumed hung (an RPC, Circle or webhook call without a timeout). */
   readonly maxTickMs: number;
   /** Best-effort founder alert on a hung tick; bounded by `alertTimeoutMs`. */
   readonly onTickTimeout?: () => Promise<void>;
@@ -202,20 +253,30 @@ function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Call `tick` every `intervalMs`, one at a time: a tick that overruns the interval delays the next one instead of
- * overlapping it. A failing tick is logged and the loop continues. Resolves `"stopped"` once `signal` aborts and the
- * in-flight tick has finished. A tick still running after `maxTickMs` is logged (`tick-timeout`), alerted
- * (best-effort, bounded) and ends the loop with `"tick-timeout"`: no further tick starts, so the hung one can never
- * overlap another.
+ * One sequential loop (AD-8, AD-20): wake every `fastIntervalMs` and run `fullTick` when `fullIntervalMs` has elapsed
+ * since the last full tick started (the first wake is always full), otherwise `fastPass`. One pass at a time: a pass
+ * that overruns the wake interval delays the next one instead of overlapping it. A failing pass is logged and the
+ * loop continues. Resolves `"stopped"` once `signal` aborts and the in-flight pass has finished. A pass still
+ * running after `maxTickMs` is logged (`tick-timeout`), alerted (best-effort, bounded) and ends the loop with
+ * `"tick-timeout"`: no further pass starts, so the hung one can never overlap another.
  */
 export async function runLoop(opts: LoopOptions): Promise<LoopExit> {
   const now = opts.now ?? (() => new Date());
+  let lastFull: number | undefined;
   while (!opts.signal.aborted) {
     const started = now();
+    const full = lastFull === undefined || started.getTime() - lastFull >= opts.fullIntervalMs;
+    if (full) lastFull = started.getTime();
+    const pass = full ? "full" : "fast";
     try {
-      const report = await raceTimeout(opts.tick(started), opts.maxTickMs);
-      if (report === TIMED_OUT) {
-        opts.log.error({ event: "tick-timeout", maxTickMs: opts.maxTickMs, startedAt: started });
+      // Resolves to the pass's log summary (undefined: a fast pass that did nothing, not logged).
+      type Summarize = (durationMs: number) => Record<string, unknown> | undefined;
+      const work: Promise<Summarize> = full
+        ? opts.fullTick(started).then((r) => (ms: number) => summarizeTick(r, ms))
+        : opts.fastPass(started).then((r) => (ms: number) => summarizeFastPass(r, ms));
+      const summarize = await raceTimeout(work, opts.maxTickMs);
+      if (summarize === TIMED_OUT) {
+        opts.log.error({ event: "tick-timeout", pass, maxTickMs: opts.maxTickMs, startedAt: started });
         if (opts.onTickTimeout !== undefined) {
           const alerted = await raceTimeout(
             opts.onTickTimeout().then(
@@ -228,11 +289,12 @@ export async function runLoop(opts: LoopOptions): Promise<LoopExit> {
         }
         return "tick-timeout";
       }
-      opts.log.info(summarizeTick(report, now().getTime() - started.getTime()));
+      const summary = summarize(now().getTime() - started.getTime());
+      if (summary !== undefined) opts.log.info(summary);
     } catch (err) {
-      opts.log.error({ event: "tick-failed", durationMs: now().getTime() - started.getTime(), error: err });
+      opts.log.error({ event: "tick-failed", pass, durationMs: now().getTime() - started.getTime(), error: err });
     }
-    await sleepUnlessAborted(opts.intervalMs - (now().getTime() - started.getTime()), opts.signal);
+    await sleepUnlessAborted(opts.fastIntervalMs - (now().getTime() - started.getTime()), opts.signal);
   }
   return "stopped";
 }
@@ -274,7 +336,11 @@ export async function main(raw: RawEnv = process.env, io: MainIo = processIo): P
     const lists = new PostgresListStore(db);
     const demo = await loadDemoList(lists, { now: new Date(), newId: () => uuidv7() });
     const vendors = (io.vendors ?? vendorRuntime)(env);
-    const worker = buildWorker({ db, ...vendors });
+    const worker = buildWorker(
+      { db, ...vendors },
+      { circleStatusPollMs: env.CIRCLE_STATUS_POLL_MS, inflightIndexMs: env.INFLIGHT_INDEX_MS },
+      { maxChunksPerTick: env.INDEXER_MAX_CHUNKS_PER_TICK, rateLimitCooldownMs: env.INDEXER_RATE_LIMIT_COOLDOWN_MS },
+    );
     const stop = new AbortController();
     const onStop = () => {
       log.info({ event: "worker-stopping" });
@@ -287,17 +353,24 @@ export async function main(raw: RawEnv = process.env, io: MainIo = processIo): P
       chainId: env.CHAIN_ID,
       chainWriter: env.chainWriter.kind,
       tickIntervalMs: env.TICK_INTERVAL_MS,
+      fastTickMs: env.FAST_TICK_MS,
+      circleStatusPollMs: env.CIRCLE_STATUS_POLL_MS,
+      inflightIndexMs: env.INFLIGHT_INDEX_MS,
+      indexerMaxChunksPerTick: env.INDEXER_MAX_CHUNKS_PER_TICK,
+      indexerRateLimitCooldownMs: env.INDEXER_RATE_LIMIT_COOLDOWN_MS,
       demoListSnapshot: demo.snapshotId,
     });
     const exit = await runLoop({
-      tick: (now) => worker.tick(now),
-      intervalMs: env.TICK_INTERVAL_MS,
+      fullTick: (now) => worker.fullTick(now),
+      fastPass: (now) => worker.fastPass(now),
+      fastIntervalMs: env.FAST_TICK_MS,
+      fullIntervalMs: env.TICK_INTERVAL_MS,
       maxTickMs: env.MAX_TICK_MS,
       onTickTimeout: () =>
         vendors.notifier.notify({
           kind: "worker-tick-timeout",
           maxTickMs: env.MAX_TICK_MS,
-          message: `A worker tick ran longer than ${env.MAX_TICK_MS} ms; the worker is exiting so Railway restarts it.`,
+          message: `A worker pass ran longer than ${env.MAX_TICK_MS} ms; the worker is exiting so Railway restarts it.`,
         }),
       signal: stop.signal,
       log,

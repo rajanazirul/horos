@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import type { PGlite } from "@electric-sql/pglite";
 import {
   buildDecisionRecord,
   evaluate,
@@ -17,9 +16,9 @@ import type { HorosDb } from "./db.js";
 import { runMigrations } from "./migrate.js";
 import { outboxExtraWrites, PostgresOutboxStore, upsertIntent } from "./outbox-store.js";
 import { PostgresRecordStore } from "./record-store.js";
-import { freshDb } from "./test-db.js";
+import { freshDb, testServerUrl, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
@@ -341,9 +340,9 @@ describe("claim, lanes and transitions", () => {
   });
 });
 
-const REAL_URL = process.env["HOROS_TEST_DATABASE_URL"];
+const REAL_URL = testServerUrl();
 
-describe.skipIf(REAL_URL === undefined || REAL_URL === "")("outbox coalescing (real Postgres)", () => {
+describe("outbox coalescing (real Postgres)", () => {
   const dbName = `horos_test_${randomBytes(6).toString("hex")}`;
   let conn: ReturnType<typeof connectPostgres> | undefined;
   const admin = async <T>(fn: (c: pg.Client) => Promise<T>): Promise<T> => {
@@ -358,7 +357,7 @@ describe.skipIf(REAL_URL === undefined || REAL_URL === "")("outbox coalescing (r
 
   beforeAll(async () => {
     await admin((c) => c.query(`CREATE DATABASE ${dbName}`));
-    const url = new URL(REAL_URL ?? "");
+    const url = new URL(REAL_URL);
     url.pathname = `/${dbName}`;
     const migrator = connectPostgres(url.toString(), 1);
     try {

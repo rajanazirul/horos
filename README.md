@@ -8,26 +8,42 @@ Horos screens every counterparty continuously. Hard rules run first, then graded
 
 Early access, built during the Tameion Agents Hackathon (Sep 27 – Oct 10, 2026).
 
-<!-- TODO(founder): fill in both lines after the first deploy (docs/runbooks/railway-deploy.md, step 10). -->
-Status: TODO(founder) (not deployed yet; Arc testnet only)
-API base URL: TODO(founder)
+Status: live on Arc testnet since 2026-09-29 (Railway, US West; testnet only, no real funds). Health: `GET /healthz`.
+API base URL: https://api-production-712e8.up.railway.app
+Public demo Scope (read-only, fictional counterparties): `enforced:01a0eb9e-de1c-7476-a673-d2f1d4f90da8`, e.g. `GET /v1/scopes/enforced:01a0eb9e-de1c-7476-a673-d2f1d4f90da8/records`.
 
 ## Requirements
 - Node 24 (`.nvmrc`: 24.21; `engines`: `>=24 <25`)
 - pnpm 12.6.0 (pinned in `packageManager`; `corepack enable` or `npx pnpm@12.6.0`)
 - Foundry 1.8.3 for `contracts/` (`foundryup --install v1.8.3`)
+- Docker, for the local Postgres (`docker-compose.yml`)
 
 ## Workspace commands
 pnpm workspaces + Turborepo. Run from the repo root.
 
 ```bash
 pnpm install                       # installs every workspace
+docker compose up -d --wait        # local Postgres: dev on :5432, tests on :54329
 pnpm turbo run build test lint typecheck
 pnpm boundary-lint                 # dependency-boundary lint (AD-1, AD-12)
 pnpm --filter @horos/landing dev   # sales page on http://localhost:3000
 ```
 
 `pnpm boundary-lint` fails when `packages/sdk`, `packages/mcp`, `packages/skill`, `packages/pipeline`, `packages/adapters`, `services/api`, `services/worker` or `apps/log` declares or imports `@horos/owner`; when `packages/core` declares or imports anything other than `@horos/schema` or a relative path; when a relative import leaves its workspace; or when a covered workspace is missing. The rule table lives in `tools/boundary-lint/src/lint.mjs`.
+
+## Local Postgres
+`docker-compose.yml` runs two Postgres 17 containers, both bound to `127.0.0.1`:
+
+- **`postgres-test` (:54329)** backs every database test. The first test in a process migrates a template database; each test then gets its own `CREATE DATABASE ... TEMPLATE` copy and drops it afterwards. Data lives in RAM with fsync off, so `docker compose up -d --force-recreate postgres-test` wipes it. Tests read `HOROS_TEST_DATABASE_URL` and default to this container; CI points it at its own service container. The helper is `@horos/adapters/testing` (test code only).
+- **`postgres` (:5432, database `horos`)** is for running the api and worker locally. It keeps its data in the `pgdata` volume and, on first start, creates the same roles as production (`tools/dev/postgres-init.sql`, runbook step 2) with dev-only passwords:
+
+| Variable | Local value |
+| --- | --- |
+| api `DATABASE_URL` | `postgres://horos_api:horos-api-dev@127.0.0.1:5432/horos` |
+| worker `DATABASE_URL` | `postgres://horos_worker:horos-worker-dev@127.0.0.1:5432/horos` |
+| worker `MIGRATOR_DATABASE_URL` | `postgres://horos_migrator:horos-migrator-dev@127.0.0.1:5432/horos` |
+
+Apply migrations with `MIGRATOR_DATABASE_URL=... node services/worker/dist/migrate.js` after `pnpm turbo run build`.
 
 ## Contracts
 Foundry project in `contracts/` (solc 0.8.37, `evm_version = "osaka"`, OpenZeppelin 5.6.1). The libraries are git submodules:
@@ -61,10 +77,10 @@ The deployer (`horos-demo-deployer`, `0x137Bb5333a33d0800a3e1aF7db76Eff1b69D307b
 
 `arc_testnet` is the `[rpc_endpoints]` alias in `contracts/foundry.toml` for `https://rpc.testnet.arc.io`; `https://rpc.testnet.arc.network` is the secondary Arc testnet endpoint (same chain, chainId 5042002) and can be passed to `--rpc-url` instead.
 
-**1. Broadcast** (the founder runs this; Foundry prompts for the keystore password. Never use `--private-key` or a `.env` holding secrets):
+**1. Broadcast** (the founder runs this; Foundry prompts for the keystore password. Never use `--private-key` or a `.env` holding secrets). `--sender` must be the deployer's address: the script checks `msg.sender` inside the broadcast, and Forge refuses to broadcast without it:
 
 ```bash
-cd contracts && HOROS_HUMAN=0x3B60Ebece31658EFDA2ad1cD28860CaBbf2E4e85 HOROS_PAYMENT=0x705F7d75b1689C42034ca5102700Be481EdCa2DA HOROS_REGISTRAR=0x7434FC9d31FEBe08082A710B255F3Fe51B6a7FfC HOROS_MODEL=0x081B31405E48eC71bedbc22adf10ebCdcAbB69a7 HOROS_RULES=0x9542e0BBC0bCC0c88033233D7d70B0dEf37e2769 forge script script/DeployPolicyWallet.s.sol:DeployPolicyWallet --rpc-url arc_testnet --account horos-demo-deployer --broadcast
+cd contracts && HOROS_HUMAN=0x3B60Ebece31658EFDA2ad1cD28860CaBbf2E4e85 HOROS_PAYMENT=0x705F7d75b1689C42034ca5102700Be481EdCa2DA HOROS_REGISTRAR=0x7434FC9d31FEBe08082A710B255F3Fe51B6a7FfC HOROS_MODEL=0x081B31405E48eC71bedbc22adf10ebCdcAbB69a7 HOROS_RULES=0x9542e0BBC0bCC0c88033233D7d70B0dEf37e2769 forge script script/DeployPolicyWallet.s.sol:DeployPolicyWallet --rpc-url arc_testnet --account horos-demo-deployer --sender 0x137Bb5333a33d0800a3e1aF7db76Eff1b69D307b --broadcast
 ```
 
 The script logs `PolicyWallet deployed at <addr>`. The receipt is in `contracts/broadcast/DeployPolicyWallet.s.sol/5042002/run-latest.json` (git-ignored). After a redeploy, take the new address from that file (`jq -r '.transactions[0].contractAddress' broadcast/DeployPolicyWallet.s.sol/5042002/run-latest.json`) and update `fixtures/horos-demo-wallet.json` before running the steps below.
@@ -244,7 +260,9 @@ The api and worker run on Railway from one `Dockerfile`, with per-service config
 | `packages/schema` | Wire and domain types, EIP-712 types, record hashing (placeholder) |
 | `packages/core` | Pure rules and Policy; depends only on `schema` (placeholder) |
 | `packages/pipeline`, `packages/adapters` | Pipeline runner and adapters (placeholders) |
-| `packages/sdk`, `packages/mcp`, `packages/skill` | Client SDK, MCP server, Claude Code skill (placeholders) |
+| `packages/sdk` | TypeScript client: signed, advisory or Shadow Mode (API key) `check()`, read-only Decision Log methods, PolicyWallet deploy helper (see `packages/sdk/README.md`) |
+| `packages/mcp` | MCP server (`horos-mcp`): `check` plus four read-only log tools (see `packages/mcp/README.md`) |
+| `packages/skill`, `.claude-plugin/` | Claude Code plugin `horos` (skill `horos-quickstart`) and the `horos-quickstart` CLI: preflight, timer, deploy, Shadow sign-up, smoke test (see `packages/skill/README.md`) |
 | `packages/owner` | Human role CLI, isolated custody domain (placeholder) |
 | `contracts` | Foundry project for the PolicyWallet |
 | `tools/boundary-lint` | Dependency-boundary lint |

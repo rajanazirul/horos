@@ -23,9 +23,20 @@ export const WorkerEnvSchema = z.object({
   // kept on the parsed env except inside `chainWriter`.
   FOUNDER_ALERT_WEBHOOK_URL: httpUrl(),
   OFAC_SDN_URL: httpUrl().default(DEFAULT_SDN_CSV_URL),
+  /** The full tick (OFAC poll, provisioning, all-wallet indexer, alerts, reconcile, full outbox pass). */
   TICK_INTERVAL_MS: intFromString(100, 3_600_000).default(5000),
+  /** The loop's wake interval: the fast pass claims and sends due outbox intents (AD-20 amendment 2026-09-29). */
+  FAST_TICK_MS: intFromString(50, 5_000).default(250),
+  /** Circle status poll cadence, only while an intent is submitted. */
+  CIRCLE_STATUS_POLL_MS: intFromString(100, 10_000).default(500),
+  /** In-flight indexer cadence: only the wallets with a submitted (or sending) intent. */
+  INFLIGHT_INDEX_MS: intFromString(250, 30_000).default(1000),
   /** A tick running longer than this is presumed hung: the worker alerts and exits 1 so Railway restarts it. */
   MAX_TICK_MS: intFromString(1_000, 3_600_000).default(120_000),
+  /** `eth_getLogs` chunks per wallet per indexer pass (catch-up stays under the shared RPC rate limit). */
+  INDEXER_MAX_CHUNKS_PER_TICK: intFromString(1, 200).default(10),
+  /** After a rate-limited indexer read, the wallet is skipped by both indexer lanes for this long. */
+  INDEXER_RATE_LIMIT_COOLDOWN_MS: intFromString(1_000, 600_000).default(30_000),
 });
 
 

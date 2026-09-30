@@ -34,7 +34,7 @@ The Layout table in `README.md` is the current map of workspaces.
 - `docs/`: research notes and the Railway deploy runbook.
 
 ## Tooling
-- ARC CLI: `uv tool install git+https://github.com/the-canteen-dev/ARC-cli` (Canteen-hosted Arc testnet RPC plus Arc docs as agent context).
+- ARC CLI: `uv tool install arc-canteen`, then `arc-canteen login` (Canteen-hosted Arc testnet RPC, a $5 test wallet, and Arc + Circle docs as agent context via `arc-canteen context sync`). See `docs/research/arc-canteen-resources-2026-09-29.md`.
 - Circle CLI: `npm install -g @circle-fin/cli` (Node ≥ 20.18.2).
 - TypeSafe skill: `claude plugin marketplace add typesafe-ai/skills` then `claude plugin install typesafe@typesafe-ai`.
 - Reference sample apps: circlefin/arc-escrow, arc-x402-circle-wallets, arc-fintech, arc-multichain-wallet.

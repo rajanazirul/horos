@@ -1,5 +1,5 @@
-import { PGlite } from "@electric-sql/pglite";
-import { PostgresAccountStore, PostgresPolicyVersionStore, runMigrations } from "@horos/adapters";
+import { freshDb, type TestClient } from "@horos/adapters/testing";
+import { PostgresAccountStore, PostgresPolicyVersionStore } from "@horos/adapters";
 import type { ChainReader, ProvisionedKeys, WalletRoles } from "@horos/core";
 import {
   accountDomain,
@@ -10,7 +10,6 @@ import {
   WEBHOOK_UPDATE_TYPES,
   type Hex,
 } from "@horos/schema";
-import { drizzle } from "drizzle-orm/pglite";
 import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
 import { createApp } from "./app.js";
@@ -76,16 +75,14 @@ class FakeReader implements ChainReader {
   }
 }
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
 
 async function setup(opts: { provisionWaitMs?: number; onSleep?: () => Promise<void> } = {}) {
-  const client = new PGlite();
+  const { client, db } = await freshDb();
   clients.push(client);
-  const db = drizzle(client);
-  await runMigrations(db);
   const accounts = new PostgresAccountStore(db);
   const reader = new FakeReader();
   const logs: Record<string, unknown>[] = [];

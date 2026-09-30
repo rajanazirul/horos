@@ -4,17 +4,27 @@
 # account. Writes a custom-format dump (`pg_dump -Fc`) to $BACKUP_DIR/horos-<UTC timestamp>.dump (never overwriting an
 # existing file), a `<dump>.sha256` integrity record next to it, and keeps the 8 newest dumps (with their checksums).
 #
-#   BACKUP_DATABASE_URL='postgres://...' BACKUP_DIR=/path/on/encrypted/volume tools/ops/backup.sh
+#   PG_DUMP=railway-ssh BACKUP_DB_PASSWORD=... BACKUP_DIR=/path tools/ops/backup.sh   (hosted Railway; default for production)
+#   BACKUP_DATABASE_URL='postgres://...' BACKUP_DIR=/path tools/ops/backup.sh             (any reachable Postgres)
 #
-# BACKUP_DATABASE_URL is the read-only `horos_backup` role (pg_read_all_data; docs/runbooks/railway-deploy.md, step 2). It is passed to pg_dump through the
-# environment, never on a command line, and never printed. pg_dump runs in the official postgres image
-# ($PG_IMAGE, default postgres:17; must be >= the server's major version) unless PG_DUMP=local selects a local
-# pg_dump.
+# Both run as the read-only `horos_backup` role (pg_read_all_data; docs/runbooks/railway-deploy.md, step 2).
+# - PG_DUMP=railway-ssh runs pg_dump inside the Railway Postgres container over `railway ssh` (the database has no
+#   public URL). BACKUP_DB_PASSWORD is the horos_backup password; it travels on the ssh session's stdin, never on a
+#   command line, and is never printed. RAILWAY_PG_SERVICE (default Postgres) and PG_DATABASE (default railway)
+#   select the target; the repo must be linked to the Railway project (`railway link`).
+# - Otherwise BACKUP_DATABASE_URL is passed to pg_dump through the environment, never on a command line, and never
+#   printed. pg_dump runs in the official postgres image ($PG_IMAGE, default postgres:18; must be >= the server's
+#   major version) unless PG_DUMP=local selects a local pg_dump.
 set -euo pipefail
 
-: "${BACKUP_DATABASE_URL:?BACKUP_DATABASE_URL is required}"
 : "${BACKUP_DIR:?BACKUP_DIR is required}"
-PG_IMAGE="${PG_IMAGE:-postgres:17}"
+MODE="${PG_DUMP:-docker}"
+if [[ "$MODE" == "railway-ssh" ]]; then
+  : "${BACKUP_DB_PASSWORD:?BACKUP_DB_PASSWORD (the horos_backup password) is required with PG_DUMP=railway-ssh}"
+else
+  : "${BACKUP_DATABASE_URL:?BACKUP_DATABASE_URL is required}"
+fi
+PG_IMAGE="${PG_IMAGE:-postgres:18}"
 KEEP=8
 
 umask 077
@@ -31,7 +41,19 @@ sha256() {
   if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi
 }
 
-if [[ "${PG_DUMP:-docker}" == "local" ]]; then
+if [[ "$MODE" == "railway-ssh" ]]; then
+  RAILWAY_BIN="${RAILWAY_BIN:-$(command -v railway || echo "$HOME/.railway/bin/railway")}"
+  [[ -x "$RAILWAY_BIN" ]] || { echo "backup: railway CLI not found (set RAILWAY_BIN)" >&2; exit 2; }
+  # The password is the first stdin line; the remote shell reads it into PGPASSWORD, then pg_dump streams the dump
+  # to stdout (binary-safe over railway ssh, verified 2026-09-29).
+  target=(--service "${RAILWAY_PG_SERVICE:-Postgres}")
+  # Outside the linked repo (e.g. a LaunchAgent), pass the project and environment explicitly.
+  [[ -n "${RAILWAY_PROJECT_ID:-}" ]] && target+=(--project "$RAILWAY_PROJECT_ID")
+  [[ -n "${RAILWAY_ENVIRONMENT_ID:-}" ]] && target+=(--environment "$RAILWAY_ENVIRONMENT_ID")
+  printf '%s\n' "$BACKUP_DB_PASSWORD" | "$RAILWAY_BIN" ssh "${target[@]}" -- \
+    sh -c "IFS= read -r PGPASSWORD; export PGPASSWORD; exec pg_dump -Fc --no-password -h 127.0.0.1 -U horos_backup -d ${PG_DATABASE:-railway}" \
+    >"$tmp" 2> >(grep -v '^Using SSH key' >&2)
+elif [[ "$MODE" == "local" ]]; then
   command -v pg_dump >/dev/null || { echo "backup: pg_dump not found (unset PG_DUMP to use Docker)" >&2; exit 2; }
   PGURL="$BACKUP_DATABASE_URL" bash -c 'pg_dump -Fc --no-password -d "$PGURL"' >"$tmp"
 else

@@ -1,11 +1,10 @@
-import type { PGlite } from "@electric-sql/pglite";
 import { SeqConflictError, STANDARD_PRESET, toOffchainPolicy } from "@horos/core";
 import type { PolicyVersion } from "@horos/schema";
 import { afterEach, describe, expect, test } from "vitest";
 import { PostgresPolicyVersionStore, pgErrorCode, pgErrorConstraint } from "./policy-version-store.js";
-import { freshDb } from "./test-db.js";
+import { freshDb, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });

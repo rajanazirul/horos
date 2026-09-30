@@ -68,6 +68,38 @@ describe("worker env", () => {
     expect(failure({ ...CIRCLE, MAX_TICK_MS: "10" })).toContain("MAX_TICK_MS");
   });
 
+  test("the fast-lane cadences default to 250 / 500 / 1000 ms and are bounded", () => {
+    const r = parseWorkerEnv(CIRCLE);
+    expect(r.ok && [r.env.FAST_TICK_MS, r.env.CIRCLE_STATUS_POLL_MS, r.env.INFLIGHT_INDEX_MS, r.env.TICK_INTERVAL_MS]).toEqual([250, 500, 1000, 5000]);
+    const ok = parseWorkerEnv({ ...CIRCLE, FAST_TICK_MS: "50", CIRCLE_STATUS_POLL_MS: "10000", INFLIGHT_INDEX_MS: "250" });
+    expect(ok.ok && [ok.env.FAST_TICK_MS, ok.env.CIRCLE_STATUS_POLL_MS, ok.env.INFLIGHT_INDEX_MS]).toEqual([50, 10_000, 250]);
+    for (const [name, low, high] of [
+      ["FAST_TICK_MS", "49", "5001"],
+      ["CIRCLE_STATUS_POLL_MS", "99", "10001"],
+      ["INFLIGHT_INDEX_MS", "249", "30001"],
+    ] as const) {
+      expect(failure({ ...CIRCLE, [name]: low })).toContain(name);
+      expect(failure({ ...CIRCLE, [name]: high })).toContain(name);
+    }
+  });
+
+  test("the indexer limits default to 10 chunks per tick and a 30 s rate-limit cooldown, and are bounded", () => {
+    const r = parseWorkerEnv(CIRCLE);
+    expect(r.ok && [r.env.INDEXER_MAX_CHUNKS_PER_TICK, r.env.INDEXER_RATE_LIMIT_COOLDOWN_MS]).toEqual([10, 30_000]);
+    const lo = parseWorkerEnv({ ...CIRCLE, INDEXER_MAX_CHUNKS_PER_TICK: "1", INDEXER_RATE_LIMIT_COOLDOWN_MS: "1000" });
+    expect(lo.ok && [lo.env.INDEXER_MAX_CHUNKS_PER_TICK, lo.env.INDEXER_RATE_LIMIT_COOLDOWN_MS]).toEqual([1, 1000]);
+    const hi = parseWorkerEnv({ ...CIRCLE, INDEXER_MAX_CHUNKS_PER_TICK: "200", INDEXER_RATE_LIMIT_COOLDOWN_MS: "600000" });
+    expect(hi.ok && [hi.env.INDEXER_MAX_CHUNKS_PER_TICK, hi.env.INDEXER_RATE_LIMIT_COOLDOWN_MS]).toEqual([200, 600_000]);
+    for (const [name, low, high] of [
+      ["INDEXER_MAX_CHUNKS_PER_TICK", "0", "201"],
+      ["INDEXER_RATE_LIMIT_COOLDOWN_MS", "999", "600001"],
+    ] as const) {
+      expect(failure({ ...CIRCLE, [name]: low })).toContain(name);
+      expect(failure({ ...CIRCLE, [name]: high })).toContain(name);
+    }
+    expect(failure({ ...CIRCLE, INDEXER_MAX_CHUNKS_PER_TICK: "ten" })).toContain("INDEXER_MAX_CHUNKS_PER_TICK");
+  });
+
   test("CHAIN_WRITER=local with NODE_ENV=production: refused", () => {
     const line = failure({ ...BASE, CHAIN_ID: "31337", CHAIN_WRITER: "local", NODE_ENV: "production", ALLOW_LOCAL_WRITER: "1", LOCAL_SIGNER_KEYS: KEYS });
     expect(line).toContain("CHAIN_WRITER (local is refused when NODE_ENV=production");

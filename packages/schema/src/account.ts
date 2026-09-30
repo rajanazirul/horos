@@ -66,6 +66,22 @@ export const WEBHOOK_UPDATE_TYPES = {
   ],
 } as const;
 
+/** Shadow Mode sign-up (Story 3.4, FR-28, AD-25), signed by the Customer's Payment key. */
+export const SHADOW_SIGNUP_PRIMARY_TYPE = "ShadowSignup";
+export const SHADOW_SIGNUP_TYPES = {
+  ShadowSignup: [
+    { name: "paymentAddress", type: "address" },
+    { name: "nonce", type: "bytes32" },
+    { name: "expiry", type: "uint64" },
+  ],
+} as const;
+
+export interface ShadowSignupMessage {
+  paymentAddress: Hex;
+  nonce: Hex;
+  expiry: bigint;
+}
+
 /** Read access to an enforced Scope's records and statuses (Story 2.8), signed by the live Payment role holder. */
 export const READ_ACCESS_PRIMARY_TYPE = "ReadAccess";
 export const READ_ACCESS_TYPES = {
@@ -225,6 +241,12 @@ export function onboardMessageFromRequest(req: OnboardingRequest): OnboardMessag
 export function bindMessageFromRequest(req: BindRequest): BindMessage {
   const auth = authOf(req);
   return { paymentAddress: req.payment_address, policyWallet: req.policy_wallet, nonce: auth.nonce, expiry: unixSeconds(auth.expiry) };
+}
+
+/** The ShadowSignup message of a signed `POST /v1/shadow` body. Throws without `auth`. */
+export function shadowSignupMessageFromRequest(req: { readonly payment_address: Hex; readonly auth?: AccountAuth }): ShadowSignupMessage {
+  const auth = authOf(req);
+  return { paymentAddress: req.payment_address, nonce: auth.nonce, expiry: unixSeconds(auth.expiry) };
 }
 
 export function webhookUpdateMessageFromRequest(req: WebhookUpdateRequest): WebhookUpdateMessage {

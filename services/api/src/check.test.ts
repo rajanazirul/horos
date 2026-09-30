@@ -1,13 +1,11 @@
-import { PGlite } from "@electric-sql/pglite";
+import { seededTemplate, type DbTemplate, type TestClient } from "@horos/adapters/testing";
 import {
   buildSnapshotContent,
   decisionRecord,
   PostgresAccountStore,
   PostgresListStore,
-  runMigrations,
   usedNonce,
   uuidv7,
-  type HorosDb,
 } from "@horos/adapters";
 import type { ChainReader, ChainView, ListSnapshot, ProvisionedKeys, WalletRoles } from "@horos/core";
 import {
@@ -19,10 +17,9 @@ import {
   type CheckRequest,
   type Hex,
 } from "@horos/schema";
-import { drizzle } from "drizzle-orm/pglite";
 import type { Context } from "hono";
 import { privateKeyToAccount } from "viem/accounts";
-import { afterEach, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { createApp } from "./app.js";
 import { DEFAULT_CHECK_RATE_PER_MINUTE, postgresCheckDeps } from "./check.js";
 import { FixedWindowLimiter } from "./rate-limit.js";
@@ -91,31 +88,29 @@ const sdn: ListSnapshot = {
   lastVerifiedAt: NOW.getTime() - 60_000,
 };
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
 
-let template: Promise<Blob> | undefined;
-/** Migrate and bind once per file; each test loads its database from the dump (far cheaper than migrating). */
-function templateDump(): Promise<Blob> {
-  template ??= (async () => {
-    const client = new PGlite();
-    const db = drizzle(client) as unknown as HorosDb;
-    await runMigrations(db);
+let template: Promise<DbTemplate> | undefined;
+/** Onboard and bind once per file; each test copies its database from that template (far cheaper than migrating). */
+function boundTemplate(): Promise<DbTemplate> {
+  template ??= seededTemplate(async (db) => {
     const accounts = new PostgresAccountStore(db);
     const { binding } = await accounts.onboard({ paymentAddress: PAY, webhookUrl: "", now: NOW });
     await accounts.setKeys(binding.customerId, KEYS, NOW);
     await accounts.bind(binding.customerId, WALLET, NOW);
-    const dump = await client.dumpDataDir("none");
-    await client.close();
-    return dump;
-  })();
+  });
   return template;
 }
 
 beforeAll(async () => {
-  await templateDump();
+  await boundTemplate();
+});
+
+afterAll(async () => {
+  await (await template)?.drop();
 });
 
 interface SetupOptions {
@@ -128,9 +123,8 @@ interface SetupOptions {
 }
 
 async function setup(opts: SetupOptions = {}) {
-  const client = new PGlite({ loadDataDir: await templateDump() });
+  const { client, db } = await (await boundTemplate()).fresh();
   clients.push(client);
-  const db = drizzle(client) as unknown as HorosDb;
   const logs: Record<string, unknown>[] = [];
   const check = postgresCheckDeps(db, {
     chainReader: new FakeChain(),

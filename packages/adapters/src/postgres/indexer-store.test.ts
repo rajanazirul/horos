@@ -1,4 +1,3 @@
-import type { PGlite } from "@electric-sql/pglite";
 import { buildDecisionRecord, buildExternalRecord, evaluate, STANDARD_PRESET, type ChainView, type ListSnapshot } from "@horos/core";
 import { toWireTime, type Hex, type Scope } from "@horos/schema";
 import { afterEach, describe, expect, test } from "vitest";
@@ -6,9 +5,9 @@ import { uuidv7 } from "../ids.js";
 import { foldMirror, PostgresIndexerStore, type MirrorState } from "./indexer-store.js";
 import { PostgresOutboxStore, upsertIntent } from "./outbox-store.js";
 import { PostgresRecordStore } from "./record-store.js";
-import { freshDb } from "./test-db.js";
+import { freshDb, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
@@ -362,5 +361,28 @@ describe("PostgresIndexerStore", () => {
       `INSERT INTO enforced_binding (customer_id, scope_id, status, policy_wallet, updated_at) VALUES ('${CUSTOMER}', '${ENFORCED}', 'bound', '${WALLET}', now())`,
     );
     expect(await store.boundWallets()).toEqual([{ scope: ENFORCED, customerId: CUSTOMER, policyWallet: WALLET }]);
+  });
+
+  test("walletsWithSubmittedIntents: bound wallets with a sending or submitted intent, once each", async () => {
+    const { store, client, outbox, decide, intent } = await setup();
+    await client.exec(`INSERT INTO customer (id, payment_address) VALUES ('${CUSTOMER}', '0x705f7d75b1689c42034ca5102700be481edca2da')`);
+    await client.exec(
+      `INSERT INTO enforced_binding (customer_id, scope_id, status, policy_wallet, updated_at) VALUES ('${CUSTOMER}', '${ENFORCED}', 'bound', '${WALLET}', now())`,
+    );
+    const ra = await decide(A);
+    const rb = await decide(B);
+    await intent([{ id: ra.record.id, hash: ra.recordHash }], { submit: false });
+    expect(await store.walletsWithSubmittedIntents()).toEqual([]); // pending only
+    const claimed = await outbox.claimNext(NOW);
+    if (claimed === undefined) throw new Error("nothing claimed");
+    const bound = [{ scope: ENFORCED, customerId: CUSTOMER, policyWallet: WALLET }];
+    expect(await store.walletsWithSubmittedIntents()).toEqual(bound); // sending
+    await outbox.markSubmitted(claimed.id, "tx-1", NOW);
+    await intent([{ id: rb.record.id, hash: rb.recordHash }], { counterparty: B, pin: true }); // the Rules lane, so claimable
+    expect(await store.walletsWithSubmittedIntents()).toEqual(bound); // two submitted intents, one wallet
+    for (const id of [claimed.id, (await outbox.list(ENFORCED, B))[0]?.id ?? ""]) {
+      await store.confirmIntent({ intentId: id, txHash: H("e"), blockNumber: 50n, onchainLimitAfter: 100n * USDC, now: NOW });
+    }
+    expect(await store.walletsWithSubmittedIntents()).toEqual([]);
   });
 });

@@ -16,6 +16,7 @@ import {
   u,
   unsignedRequest,
   USDC,
+  WALLET,
   type Harness,
 } from "./harness.test-helpers.js";
 
@@ -114,26 +115,52 @@ describe("signed Checks (enforced Scope)", () => {
     expect(polls).toBe(3);
   });
 
-  test("the wait is bounded by elapsed time, not poll count (slow intentState)", async () => {
-    for (const budget of [2000, Number.NaN, Number.POSITIVE_INFINITY]) {
+  test("the default budget is 0: pending at once, no sleep", async () => {
+    const h = await setup();
+    const deps = { ...h.deps };
+    Reflect.deleteProperty(deps, "limitWriteWaitMs"); // the harness sets 0 explicitly; exercise the default
+    h.deps = deps;
+    let sleeps = 0;
+    h.onSleep = async () => {
+      sleeps++;
+    };
+    const o = decided(await runCheck(await signedRequest(), h.deps));
+    expect(o.response.limit_write).toBe("pending");
+    expect(o.response.tx_hash).toBeUndefined();
+    expect(sleeps).toBe(0);
+  });
+
+  test("a non-finite budget means the default (no wait)", async () => {
+    for (const budget of [Number.NaN, Number.POSITIVE_INFINITY]) {
       const h = await setup({ limitWriteWaitMs: budget });
-      let reads = 0;
-      const real = h.deps.intentState;
-      h.deps = {
-        ...h.deps,
-        intentState: async (...args) => {
-          reads++;
-          h.clock.ms += 700; // each read takes 700 ms
-          return real(...args);
-        },
+      let sleeps = 0;
+      h.onSleep = async () => {
+        sleeps++;
       };
-      const start = h.clock.ms;
-      const o = decided(await runCheck(await signedRequest({ nowMs: start }), h.deps));
+      const o = decided(await runCheck(await signedRequest(), h.deps));
       expect(o.response.limit_write).toBe("pending");
-      // Reads at 0, 800 and 1600 ms; the third ends past the 2000 ms deadline (a non-finite budget means the default).
-      expect(reads).toBe(3);
-      expect(h.clock.ms - start).toBeLessThan(2000 + 700 + 100);
+      expect(sleeps).toBe(0);
     }
+  });
+
+  test("the wait is bounded by elapsed time, not poll count (slow intentState)", async () => {
+    const h = await setup({ limitWriteWaitMs: 2000 });
+    let reads = 0;
+    const real = h.deps.intentState;
+    h.deps = {
+      ...h.deps,
+      intentState: async (...args) => {
+        reads++;
+        h.clock.ms += 700; // each read takes 700 ms
+        return real(...args);
+      },
+    };
+    const start = h.clock.ms;
+    const o = decided(await runCheck(await signedRequest({ nowMs: start }), h.deps));
+    expect(o.response.limit_write).toBe("pending");
+    // Reads at 0, 800 and 1600 ms; the third ends past the 2000 ms deadline.
+    expect(reads).toBe(3);
+    expect(h.clock.ms - start).toBeLessThan(2000 + 700 + 100);
   });
 
   test("an intent still pending when the budget ends stays pending (no tx_hash)", async () => {
@@ -239,7 +266,7 @@ describe("chain reads (AD-3)", () => {
   test("mirror fallback: payeeIsContract comes from a successful hasCode read, else is assumed true", async () => {
     const h = await setup();
     await h.indexer.applyMirror(h.scope, PAYEE, { kind: "registered", limit: 100n * USDC }, { block: 1n, logIndex: 0 }, new Date(h.clock.ms));
-    const auth = { kind: "enforced", scope: h.scope as never, customerId: h.customerId, nonce: `0x${"1".repeat(64)}` as Hex, rolesLive: true } as const;
+    const auth = { kind: "enforced", scope: h.scope as never, customerId: h.customerId, nonce: `0x${"1".repeat(64)}` as Hex, policyWallet: WALLET, rolesLive: true } as const;
     const down = { status: "rejected", reason: new Error("down") } as const;
     const policy = { status: "fulfilled", value: h.chain.livePolicy } as const;
     const withCode = (hasCode: PromiseSettledResult<boolean>) => chainInput(h.deps, auth, PAYEE, { remaining: down, policy, hasCode });

@@ -50,6 +50,13 @@
       "when": 1790605762704,
       "tag": "0006_app_reads_migration_journal",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790731064118,
+      "tag": "0007_shadow_mode",
+      "breakpoints": true
     }
   ]
 }

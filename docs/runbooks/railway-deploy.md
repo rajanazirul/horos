@@ -41,7 +41,7 @@ Five roles, none of them a superuser. The Railway `postgres` superuser is used o
 
 | Role | Login | Privileges | Used by |
 |---|---|---|---|
-| `horos_app` | no | INSERT and SELECT on records, receipts, snapshots, PolicyVersions and nonces, plus the mutable outbox, job and chain-head rows (granted by the migrations); SELECT on `drizzle.__drizzle_migrations` (migration 0006) | parent of the two service logins |
+| `horos_app` | no | INSERT and SELECT on records, receipts, snapshots, PolicyVersions and nonces, plus the mutable outbox, job and chain-head rows (granted by the migrations); SELECT on `drizzle.__drizzle_migrations` (migration 0006); SELECT, INSERT and UPDATE on the Shadow Mode tables (migration 0007) | parent of the two service logins |
 | `horos_api` | yes | member of `horos_app` only | api `DATABASE_URL` |
 | `horos_worker` | yes | member of `horos_app` only | worker `DATABASE_URL` |
 | `horos_migrator` | yes | CREATE on the database and the `public` schema; owns what the migrations create | worker `MIGRATOR_DATABASE_URL` (pre-deploy only) |
@@ -118,8 +118,13 @@ Use Railway reference variables so the database host is never typed. Put the thr
 | `CIRCLE_ENTITY_SECRET` | the registered entity secret, sealed (register its ciphertext in the Circle console first) |
 | `FOUNDER_ALERT_WEBHOOK_URL` | the founder alert webhook (Slack/Discord incoming webhook), sealed |
 | `OFAC_SDN_URL` | optional (default: OFAC's published `SDN.CSV`) |
-| `TICK_INTERVAL_MS` | optional (default 5000) |
-| `MAX_TICK_MS` | optional (default 120000; a longer tick alerts and restarts the worker) |
+| `TICK_INTERVAL_MS` | optional (default 5000; the full tick: OFAC poll, provisioning, all-wallet indexer, alerts, reconcile, full outbox pass) |
+| `FAST_TICK_MS` | optional (default 250, 50–5000; the loop's wake interval: claim and send due outbox intents) |
+| `CIRCLE_STATUS_POLL_MS` | optional (default 500, 100–10000; Circle status poll, only while a write is submitted) |
+| `INFLIGHT_INDEX_MS` | optional (default 1000, 250–30000; indexes only the wallets with a write in flight) |
+| `MAX_TICK_MS` | optional (default 120000; a longer pass alerts and restarts the worker) |
+| `INDEXER_MAX_CHUNKS_PER_TICK` | optional (default 10, 1–200; `eth_getLogs` chunks of 2000 blocks per wallet per pass, so catch-up stays under the public Arc RPC's shared rate limit) |
+| `INDEXER_RATE_LIMIT_COOLDOWN_MS` | optional (default 30000, 1000–600000; after a rate-limited indexer read, that wallet is skipped by the full tick and the fast lane for this long; logged once, then as `coolingDown`) |
 | `LOG_LEVEL` | optional |
 
 **Check:** list the variable names only (`railway variables --service api --kv | cut -d= -f1`, and the same for `worker`). The api list must not contain `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `MIGRATOR_DATABASE_URL` or `LOCAL_SIGNER_KEYS`. The worker list must contain the Circle pair and `MIGRATOR_DATABASE_URL`. Both contain `JEV_API_KEY`. No value contains the `postgres` superuser. Step 4 is the real test: each service validates its environment at boot and names anything missing or malformed.
@@ -128,28 +133,38 @@ Use Railway reference variables so the database host is never typed. Put the thr
 
 Deploy `worker` first (`railway up --service worker`, or push to `main`). Its pre-deploy step migrates the schema as `horos_migrator`; the advisory lock serialises overlapping runs and gives up after 5 minutes. Then deploy `api`. Until the worker's migration has run, the api's `/healthz` answers 503 `schema-behind`, so an api that deploys first simply stays unhealthy until the schema catches up.
 
+Migration 0007 (Story 3.4) adds the Shadow Mode tables: `shadow_api_key` (sha256 of each API key, never the key),
+`shadow_ledger_counterparty` and `shadow_ledger_slot` (the virtual ledger). It needs no new environment variable; the
+api mounts `POST /v1/shadow`, `POST /v1/shadow/check` and `GET /v1/scopes/:scope/shadow-summary` on the existing
+settings. Managing Shadow API keys by hand: see "Shadow Mode API keys" under "Rotate secrets".
+
 **Check:**
 1. The worker's pre-deploy log ends with `{"level":"info","service":"migrate","event":"migrations-applied",...}`.
 2. The api log shows `"event":"api-listening"` and the deployment turns healthy (Railway polls `/healthz`).
 3. `curl -s "$API/healthz"` prints `{"status":"ok","db":"ok","migrations":{"applied":N,"bundled":N}}` with equal numbers.
 4. The worker log shows `"event":"worker-started"` with `"chainWriter":"circle"`, then one `"event":"tick"` line about every 5 s. The first tick's `ofac` should be `{"ran":true,"outcome":"activated"}`.
-5. No log line contains a password, the admin token, a Circle secret or an RPC path. Search the logs for `horos_api:`, `horos_migrator:`, `sk_`, `TEST_API_KEY`, `LIVE_API_KEY` and your RPC key; there should be no hits.
+5. No log line contains a password, the admin token, a Circle secret or an RPC path. Search the logs for `horos_api:`, `horos_migrator:`, `sk_` (this also matches Shadow Mode `hsk_` keys), `TEST_API_KEY`, `LIVE_API_KEY` and your RPC key; there should be no hits.
 
 If a service exits at boot, its log has one line `horos-api: invalid environment: NAME (problem), ...` naming the variables to fix. Values are never printed.
 
 ## 5. Backups
 
-1. Railway: Postgres service → Backups → enable daily backups (keep the default retention).
-2. Weekly off-platform copy on founder-held, encrypted storage, as the read-only `horos_backup` role:
+1. Railway: Postgres service → Backups → enable daily backups (keep the default retention). **Pro plan only** (checked 2026-09-29: on Hobby the Backups tab says creating backups and PITR need Pro). On Hobby, the off-platform dumps below are the only backups, so run them daily rather than weekly.
+2. Weekly off-platform copy on founder-held storage, as the read-only `horos_backup` role. The hosted Postgres has no public URL, so `backup.sh` runs `pg_dump` inside the Railway Postgres container over `railway ssh` (your SSH key must be registered: `railway ssh keys add`). The horos_backup password travels on stdin and is never printed:
 
 ```bash
-read -rs BACKUP_DATABASE_URL   # postgresql://horos_backup:<password>@<public host>:<public port>/<database>, then Enter
-export BACKUP_DATABASE_URL BACKUP_DIR=/Volumes/<encrypted>/horos-backups
-tools/ops/backup.sh             # writes horos-<UTC timestamp>.dump + .dump.sha256, never overwrites, keeps the 8 newest dumps
-unset BACKUP_DATABASE_URL
+BACKUP_DB_PASSWORD="$(grep '^HOROS_BACKUP_DB_PASSWORD=' ~/.config/horos/db-passwords.env | cut -d= -f2-)" \
+  PG_DUMP=railway-ssh BACKUP_DIR=$HOME/Backups/horos tools/ops/backup.sh
 ```
 
-Take the public host and port from the Postgres service's `DATABASE_PUBLIC_URL`, with the `horos_backup` user and password in place of the superuser's. `backup.sh` runs `pg_dump -Fc` in the `postgres:17` image by default. Set `PG_IMAGE=postgres:<major>` if Railway runs a newer major version (check with `SELECT version();`), or `PG_DUMP=local` to use a local `pg_dump`. Put the same four lines in a weekly calendar reminder or a local cron job that reads the URL from your password manager's CLI.
+It writes `horos-<UTC timestamp>.dump` plus `.dump.sha256`, never overwrites, and keeps the 8 newest dumps. To run it daily on your Mac, install the LaunchAgent once (it copies the two scripts to `~/.local/share/horos-ops`, because macOS blocks LaunchAgents from `~/Desktop`; no secrets are copied; the password is read from `db-passwords.env` at run time):
+
+```bash
+RAILWAY_PROJECT_ID=<project id> RAILWAY_ENVIRONMENT_ID=<environment id> tools/ops/install-backup-agent.sh
+launchctl kickstart gui/$(id -u)/com.horos.backup-daily   # optional: run once now; log in ~/Backups/horos/backup.log
+```
+
+It runs daily at 03:00 local (or on wake). Re-run the installer after changing either script; `~/Backups/horos` is mode 700 and outside the repo. For a Postgres reachable by URL, `BACKUP_DATABASE_URL=... tools/ops/backup.sh` still works (pg_dump in the `postgres:18` image by default; `PG_IMAGE` overrides, and it must be at least the server's major version).
 
 **Check:** the Railway Backups tab lists a backup; `ls -l $BACKUP_DIR` shows the new `horos-<timestamp>.dump` and its `.sha256`; `(cd $BACKUP_DIR && shasum -a 256 -c horos-<timestamp>.dump.sha256)` prints `OK`.
 
@@ -259,6 +274,13 @@ Rotate on any suspected exposure, when someone loses access, and at least before
 | `FOUNDER_ALERT_WEBHOOK_URL` | create a new incoming webhook → update the worker → delete the old webhook. |
 | Smoke Payment key | the smoke wallet's Human calls `grantRole(0, <new payment address>, 0x0…0)` (Checks authenticate against the live Payment role), then update `HOROS_SMOKE_PAYMENT_KEY` in the `smoke` environment and run the smoke workflow. If its answers come back advisory, onboard and bind the smoke wallet again under the new Payment address (step 9.2). |
 
+### Shadow Mode API keys
+
+A customer rotates their own key by signing up again (`POST /v1/shadow`, Payment-signed): the new key replaces the old one at once.
+
+- **Issue a key for a customer (admin):** `curl -s -X POST "$API/v1/shadow" -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' -d '{"payment_address":"0x…"}'`. The response carries `apiKey` once; hand it to the customer over a private channel and do not paste it anywhere else. Any earlier key of that customer is revoked. A customer whose PolicyWallet is bound gets `410 shadow_closed`.
+- **Revoke a key without issuing a new one:** superuser (or `horos_api`) psql: `UPDATE shadow_api_key SET revoked_at = now() WHERE customer_id = '<customer uuid>' AND revoked_at IS NULL;`. To revoke one leaked key only, match its hash: `WHERE key_hash = encode(sha256(convert_to('<the hsk_ key>', 'UTF8')), 'hex')`, and run it from a session whose history is not kept. The next shadow Check with that key answers 401.
+
 ## Incident response
 
 | Signal | What it means | What to do |
@@ -270,6 +292,6 @@ Rotate on any suspected exposure, when someone loses access, and at least before
 
 ## Open checks (not settled by this story)
 
-- **Circle credentials and the `contractExecution` benchmark** (day-1 check 3): measure submit → `COMPLETE` p50/p95 over about 30 writes from the Demo EOAs. Pass if p95 ≤ 2 s (NFR-1). The fallback is the local-key writer, which the worker refuses in production. Using it would need an AD-15 amendment.
+- **Circle credentials and the `contractExecution` benchmark** (day-1 check 3): measured 2026-09-29 at submit → `COMPLETE` p95 3.87 s, so NFR-1 was amended: the write budget is confirmed on Arc (indexer join), from intent commit, p95 ≤ 6 s and p50 ≤ 3.5 s, served by the worker's fast lane (`FAST_TICK_MS`, `CIRCLE_STATUS_POLL_MS`, `INFLIGHT_INDEX_MS`). Circle stays the production writer (AD-15 unchanged).
 - **Arc RPC historical reads and the `eth_getLogs` range:** the indexer uses historical `eth_getCode` (the deploy-block search) and historical `eth_call` (`rolesAt`), with `logs` chunks of at most 2000 blocks. Confirm that both configured RPCs serve archive state and accept a 2000-block range. If they do not, the worker's tick summary shows `indexer.errors`. The fallbacks (from Story 2.7) are storing the deploy block at bind and a role mirror built from `RoleGranted`/`RoleRevoked`.
 - **The AD-17 error codes:** internal failures still return a plain `500`, and 403/404/503 reuse `validation_failed` (deferred from Stories 2.8 and 2.9). Settle the AD-17 amendment before the SDK and MCP (Epic 3) branch on `code`.

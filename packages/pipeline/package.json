@@ -25,7 +25,6 @@
     "@horos/schema": "workspace:*"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.8",
     "@horos/adapters": "workspace:*",
     "drizzle-orm": "0.45.3",
     "viem": "2.56.9"

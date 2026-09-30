@@ -1,0 +1,16 @@
+{
+  "name": "horos",
+  "owner": {
+    "name": "Horos"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for Horos, the only-tighten safety layer for agents that pay in USDC"
+  },
+  "plugins": [
+    {
+      "name": "horos",
+      "source": "./packages/skill/plugin",
+      "description": "The horos-quickstart skill: wire Horos into a USDC-paying agent in under ten minutes"
+    }
+  ]
+}

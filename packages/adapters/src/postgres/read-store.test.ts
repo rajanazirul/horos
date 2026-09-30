@@ -1,4 +1,3 @@
-import type { PGlite } from "@electric-sql/pglite";
 import { buildExternalRecord, foldStatus } from "@horos/core";
 import { DecisionRecord, toWireTime, type Decision, type Hex, type Scope } from "@horos/schema";
 import { afterEach, describe, expect, test } from "vitest";
@@ -7,9 +6,9 @@ import { PostgresIndexerStore } from "./indexer-store.js";
 import { PostgresOutboxStore, upsertIntent } from "./outbox-store.js";
 import { pageLimit, PostgresReadStore } from "./read-store.js";
 import { PostgresRecordStore } from "./record-store.js";
-import { freshDb } from "./test-db.js";
+import { freshDb, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });

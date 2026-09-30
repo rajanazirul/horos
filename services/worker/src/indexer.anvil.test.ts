@@ -3,7 +3,7 @@
 // Gated on HOROS_TEST_ANVIL=1 (needs `anvil` on PATH and `forge build` output in contracts/out).
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { PGlite } from "@electric-sql/pglite";
+import { freshDb, type TestClient } from "@horos/adapters/testing";
 import {
   chainConfig,
   LocalKeyChainWriter,
@@ -15,14 +15,12 @@ import {
   PostgresListStore,
   PostgresOutboxStore,
   PostgresRecordStore,
-  runMigrations,
   uuidv7,
   ViemChainReader,
   type ChainConfig,
 } from "@horos/adapters";
 import { buildDecisionRecord, evaluate, STANDARD_PRESET, type ChainView, type FounderAlert, type ListSnapshot, type Notifier } from "@horos/core";
 import { isExternalRecord, toWireTime, ZERO_BYTES32, type Hex, type Scope } from "@horos/schema";
-import { drizzle } from "drizzle-orm/pglite";
 import { createPublicClient, createWalletClient, http, toHex } from "viem";
 import { mnemonicToAccount, privateKeyToAccount } from "viem/accounts";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -57,7 +55,7 @@ describe.skipIf(process.env["HOROS_TEST_ANVIL"] !== "1")("indexer end to end on 
   let config: ChainConfig;
   let url: string;
   let wallet: Hex;
-  const pg = new PGlite();
+  let dbClient: TestClient | undefined;
 
   beforeAll(async () => {
     const port = 20_000 + Math.floor(Math.random() * 30_000);
@@ -96,12 +94,13 @@ describe.skipIf(process.env["HOROS_TEST_ANVIL"] !== "1")("indexer end to end on 
 
   afterAll(async () => {
     anvil?.kill();
-    await pg.close();
+    await dbClient?.close();
   });
 
   test("register (2.6 race) and tighten via the outbox, a Human setLimit, then index: confirmed receipts + one ExternalRecord", async () => {
-    const db = drizzle(pg);
-    await runMigrations(db);
+    const fresh = await freshDb();
+    dbClient = fresh.client;
+    const { db } = fresh;
     const accounts = new PostgresAccountStore(db);
     const records = new PostgresRecordStore(db);
     const outbox = new PostgresOutboxStore(db);
@@ -182,7 +181,7 @@ describe.skipIf(process.env["HOROS_TEST_ANVIL"] !== "1")("indexer end to end on 
     };
     const tickUntil = async (done: () => Promise<boolean>) => {
       for (let i = 0; i < 60; i++) {
-        const r = await worker.tick(now());
+        const r = await worker.fullTick(now());
         for (const w of r.indexer?.wallets ?? []) if (w.error !== undefined) throw new Error(w.error);
         if (await done()) return;
         await new Promise((res) => setTimeout(res, 100));

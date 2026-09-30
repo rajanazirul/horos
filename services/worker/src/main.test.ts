@@ -1,6 +1,6 @@
 // The worker entry point: env failures, the non-overlapping tick loop with SIGTERM, the tick summary, and one real
-// tick through `buildWorker` on a migrated PGlite database with fake vendors.
-import type { PGlite } from "@electric-sql/pglite";
+// tick through `buildWorker` on a migrated test database with fake vendors.
+import { freshDb, type TestClient } from "@horos/adapters/testing";
 import {
   CircleChainWriter,
   CircleKeyProvisioner,
@@ -8,18 +8,16 @@ import {
   LocalKeyChainWriter,
   localKeyProvisioner,
   ViemChainReader,
-  type HorosDb,
   type SdnFetchResult,
 } from "@horos/adapters";
 import type { ChainReader, ChainWriter, FounderAlert, Notifier } from "@horos/core";
-import { drizzle } from "drizzle-orm/pglite";
 import { readFileSync } from "node:fs";
 import { privateKeyToAccount } from "viem/accounts";
-import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { parseWorkerEnv } from "./env.js";
-import { buildWorker, main, runLoop, summarizeTick, vendorRuntime } from "./main.js";
-import { migratedClient, migratedDump } from "./migrated-db.test-helpers.js";
-import type { TickReport } from "./tick.js";
+import { buildWorker, main, runLoop, summarizeFastPass, summarizeTick, vendorRuntime } from "./main.js";
+import type { WalletIndexReport } from "./indexer.js";
+import type { FastPassReport, TickReport } from "./tick.js";
 
 const SAMPLE = readFileSync(new URL("../../../fixtures/ofac/sdn-sample.csv", import.meta.url), "utf8");
 const T0 = new Date("2026-09-28T12:00:00.000Z");
@@ -31,6 +29,9 @@ function capture() {
 
 const idleReport = (now: Date): TickReport => ({ job: "ofac-poll", window: now.toISOString().slice(0, 13), ran: false });
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const noFastPass = async (): Promise<FastPassReport> => {
+  throw new Error("no fast pass expected");
+};
 
 describe("main: environment failures", () => {
   test("CHAIN_WRITER=circle without CIRCLE_ENTITY_SECRET: exit code 1, named, no values", async () => {
@@ -83,11 +84,13 @@ describe("runLoop", () => {
     let ticks = 0;
     let finishedAfterAbort = false;
     const loop = runLoop({
-      intervalMs: 5,
+      fastIntervalMs: 5,
+      fullIntervalMs: 0, // every wake is a full tick
       maxTickMs: 10_000,
       signal: stop.signal,
       log,
-      tick: async (now) => {
+      fastPass: noFastPass,
+      fullTick: async (now) => {
         active++;
         maxActive = Math.max(maxActive, active);
         ticks++;
@@ -115,11 +118,13 @@ describe("runLoop", () => {
     const stop = new AbortController();
     let n = 0;
     const loop = runLoop({
-      intervalMs: 60_000,
+      fastIntervalMs: 60_000,
+      fullIntervalMs: 60_000,
       maxTickMs: 10_000,
       signal: stop.signal,
       log,
-      tick: async (now) => {
+      fastPass: noFastPass,
+      fullTick: async (now) => {
         n++;
         if (n === 1) throw new Error("rpc https://rpc.example/v2/secret-key-in-path down");
         return idleReport(now);
@@ -136,17 +141,131 @@ describe("runLoop", () => {
   });
 });
 
+describe("runLoop: fast lane and full tick (fake clock)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("wakes every FAST_TICK_MS; a full tick every TICK_INTERVAL_MS, fast passes between; never two at once", async () => {
+    vi.useFakeTimers({ now: T0 });
+    const { log, entries } = capture();
+    const stop = new AbortController();
+    const starts: [string, number][] = [];
+    let active = 0;
+    let maxActive = 0;
+    const pass = async (kind: string, now: Date, ms: number) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      starts.push([kind, now.getTime() - T0.getTime()]);
+      await new Promise((r) => setTimeout(r, ms));
+      active--;
+    };
+    const loop = runLoop({
+      fastIntervalMs: 250,
+      fullIntervalMs: 5000,
+      maxTickMs: 60_000,
+      signal: stop.signal,
+      log,
+      fullTick: async (now) => (await pass("full", now, 100), idleReport(now)),
+      fastPass: async (now) => (await pass("fast", now, 10), {}),
+    });
+    await vi.advanceTimersByTimeAsync(10_050);
+    stop.abort();
+    await vi.runOnlyPendingTimersAsync();
+    expect(await loop).toBe("stopped");
+    expect(maxActive).toBe(1);
+    expect(starts.filter(([k]) => k === "full").map(([, t]) => t)).toEqual([0, 5000, 10_000]);
+    const fast = starts.filter(([k]) => k === "fast").map(([, t]) => t);
+    expect(fast).toEqual(Array.from({ length: 38 }, (_, i) => 250 * (i + 1 + (i >= 19 ? 1 : 0))));
+    // Idle fast passes are not logged; each full tick is.
+    expect(entries().map((e) => e["event"])).toEqual(["tick", "tick", "tick"]);
+  });
+
+  test("a slow full tick delays the next wake instead of overlapping it; the full cadence is measured start to start", async () => {
+    vi.useFakeTimers({ now: T0 });
+    const { log } = capture();
+    const stop = new AbortController();
+    const starts: [string, number][] = [];
+    let active = 0;
+    let maxActive = 0;
+    const loop = runLoop({
+      fastIntervalMs: 250,
+      fullIntervalMs: 1000,
+      maxTickMs: 60_000,
+      signal: stop.signal,
+      log,
+      fullTick: async (now) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        starts.push(["full", now.getTime() - T0.getTime()]);
+        await new Promise((r) => setTimeout(r, 600));
+        active--;
+        return idleReport(now);
+      },
+      fastPass: async (now) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        starts.push(["fast", now.getTime() - T0.getTime()]);
+        active--;
+        return { outbox: { processed: [{ id: "i1", kind: "noop" }] } };
+      },
+    });
+    await vi.advanceTimersByTimeAsync(2100);
+    stop.abort();
+    await vi.runOnlyPendingTimersAsync();
+    await loop;
+    expect(maxActive).toBe(1);
+    expect(starts).toEqual([
+      ["full", 0],
+      ["fast", 600],
+      ["fast", 850],
+      ["full", 1100],
+      ["fast", 1700],
+      ["fast", 1950],
+    ]);
+  });
+});
+
+describe("summarizeFastPass", () => {
+  test("undefined when the pass did nothing; counts otherwise", () => {
+    expect(summarizeFastPass({}, 1)).toBeUndefined();
+    expect(summarizeFastPass({ outbox: { polled: [], processed: [] } }, 1)).toBeUndefined();
+    expect(
+      summarizeFastPass(
+        {
+          outbox: { polled: [{ id: "i1", kind: "tx-hash" }], processed: [{ id: "i2", kind: "submitted", fn: "tighten", txId: "t" }] },
+          indexer: { wallets: [{ policyWallet: "0x7ed77bdd025d461e15d8e85dbf3ab0e9a286774c", scope: "enforced:x", chunks: 1, confirmed: 1, external: 0, paid: 0, alerts: 0 }] },
+        },
+        3,
+      ),
+    ).toEqual({ event: "fast-pass", durationMs: 3, outbox: { polled: { "tx-hash": 1 }, processed: { submitted: 1 } }, indexer: { wallets: 1, confirmed: 1, errors: [] } });
+  });
+
+  test("a wallet cooling down: the rate-limit error once when it starts, then nothing logged while it is skipped", () => {
+    const base = { policyWallet: "0x7ed77bdd025d461e15d8e85dbf3ab0e9a286774c", scope: "enforced:x", chunks: 0, confirmed: 0, external: 0, paid: 0, alerts: 0 } as const;
+    const until = new Date("2026-09-28T12:00:30.000Z");
+    expect(summarizeFastPass({ indexer: { wallets: [{ ...base, error: "rate limit exceeded", coolingDownUntil: until }] } }, 1)).toEqual({
+      event: "fast-pass",
+      durationMs: 1,
+      indexer: { wallets: 1, confirmed: 0, errors: ["rate limit exceeded"], coolingDown: 1 },
+    });
+    expect(summarizeFastPass({ indexer: { wallets: [{ ...base, coolingDownUntil: until }] } }, 1)).toBeUndefined();
+  });
+});
+
 describe("runLoop: a hung tick", () => {
   test("a never-resolving tick ends the loop with tick-timeout, logs it and sends a bounded founder alert", async () => {
     const { log, entries } = capture();
     let ticks = 0;
     let alerts = 0;
     const exit = await runLoop({
-      intervalMs: 5,
+      fastIntervalMs: 5,
+      fullIntervalMs: 5,
       maxTickMs: 50,
       signal: new AbortController().signal,
       log,
-      tick: () => {
+      fastPass: noFastPass,
+      fullTick: () => {
         ticks++;
         return new Promise<never>(() => {});
       },
@@ -163,12 +282,14 @@ describe("runLoop: a hung tick", () => {
     const { log, entries } = capture();
     const started = Date.now();
     const exit = await runLoop({
-      intervalMs: 5,
+      fastIntervalMs: 5,
+      fullIntervalMs: 5,
       maxTickMs: 20,
       alertTimeoutMs: 30,
       signal: new AbortController().signal,
       log,
-      tick: () => new Promise<never>(() => {}),
+      fastPass: noFastPass,
+      fullTick: () => new Promise<never>(() => {}),
       onTickTimeout: () => new Promise<void>(() => {}),
     });
     expect(exit).toBe("tick-timeout");
@@ -212,19 +333,33 @@ describe("summarizeTick", () => {
     });
     expect(JSON.stringify(s)).not.toContain("0x7ed77");
   });
+
+  test("a wallet cooling down after a rate limit is counted; its error is not repeated on the ticks that skip it", () => {
+    const base = { policyWallet: "0x7ed77bdd025d461e15d8e85dbf3ab0e9a286774c", scope: "enforced:x", chunks: 0, confirmed: 0, external: 0, paid: 0, alerts: 0 } as const;
+    const tick = (w: WalletIndexReport): TickReport => ({
+      job: "ofac-poll",
+      window: "2026-09-28T12",
+      ran: false,
+      indexer: { wallets: [w], reconciled: 0, alertsDelivered: [], alertErrors: [] },
+    });
+    const until = new Date("2026-09-28T12:00:30.000Z");
+    expect(summarizeTick(tick({ ...base, error: "rate limit exceeded", coolingDownUntil: until }), 1)["indexer"]).toMatchObject({
+      errors: ["rate limit exceeded"],
+      coolingDown: 1,
+    });
+    expect(summarizeTick(tick({ ...base, coolingDownUntil: until }), 1)["indexer"]).toMatchObject({ errors: [], coolingDown: 1 });
+    expect(summarizeTick(tick(base), 1)["indexer"]).not.toHaveProperty("coolingDown");
+  });
 });
 
 describe("buildWorker", () => {
-  beforeAll(async () => {
-    await migratedDump();
-  });
-  const clients: PGlite[] = [];
+  const clients: TestClient[] = [];
   afterEach(async () => {
     while (clients.length) await clients.pop()?.close();
   });
 
   test("one tick runs the OFAC poll, provisioning, the outbox and the indexer against the database", async () => {
-    const client = await migratedClient();
+    const { client, db } = await freshDb();
     clients.push(client);
     const unused = new Proxy({} as ChainReader & ChainWriter, {
       get: () => async () => {
@@ -234,14 +369,14 @@ describe("buildWorker", () => {
     const alerts: FounderAlert[] = [];
     const notifier: Notifier = { notify: async (a) => void alerts.push(a) };
     const worker = buildWorker({
-      db: drizzle(client) as unknown as HorosDb,
+      db,
       reader: unused,
       writer: unused,
       provisioner: localKeyProvisioner({}),
       fetchSdn: async (): Promise<SdnFetchResult> => ({ status: 200, body: SAMPLE }),
       notifier,
     });
-    const report = await worker.tick(T0);
+    const report = await worker.fullTick(T0);
     expect(report).toMatchObject({ job: "ofac-poll", ran: true, outcome: { kind: "activated" } });
     expect(report.provision).toEqual({ provisioned: [], failed: [] });
     expect(report.outbox?.processed).toEqual([]);
@@ -269,23 +404,20 @@ const LOCAL_ENV = {
 } as const;
 
 describe("main: the success path", () => {
-  beforeAll(async () => {
-    await migratedDump();
-  });
-  const clients: PGlite[] = [];
+  const clients: TestClient[] = [];
   afterEach(async () => {
     while (clients.length) await clients.pop()?.close();
   });
 
   test("boots on a valid local env, ticks, and resolves 0 after SIGTERM once the current tick finishes", async () => {
-    const client = await migratedClient();
+    const { client, db } = await freshDb();
     clients.push(client);
     const handlers = new Map<string, () => void>();
     const lines: string[] = [];
     const done = main(LOCAL_ENV, {
       stderr: (l) => lines.push(l),
       onSignal: (sig, h) => void handlers.set(sig, h),
-      db: drizzle(client) as unknown as HorosDb,
+      db,
       write: (l) => lines.push(l),
     });
     for (let i = 0; i < 200 && !lines.some((l) => l.includes('"event":"tick"')); i++) await wait(25);
@@ -295,7 +427,13 @@ describe("main: the success path", () => {
     expect(await done).toBe(0);
     const events = lines.map((l) => (JSON.parse(l) as { event: string }).event);
     expect(events[0]).toBe("worker-started");
-    expect(events.slice(-2)).toEqual(["worker-stopping", "worker-stopped"]);
+    // SIGTERM can land mid-pass (a full tick starts every 100 ms here): that in-flight pass may still log its summary
+    // after worker-stopping, but no further pass starts.
+    expect(events.at(-1)).toBe("worker-stopped");
+    const afterStopping = events.slice(events.indexOf("worker-stopping") + 1, -1);
+    expect(events).toContain("worker-stopping");
+    expect(afterStopping.length).toBeLessThanOrEqual(1);
+    expect(afterStopping.every((e) => e === "tick" || e === "fast-pass")).toBe(true);
     const out = lines.join("\n");
     for (const k of Object.values(LOCAL_KEYS)) expect(out).not.toContain(k.slice(2));
   });

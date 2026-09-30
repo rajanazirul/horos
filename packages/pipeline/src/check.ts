@@ -6,11 +6,15 @@
 import {
   buildDecisionRecord,
   evaluate,
+  findPreset,
   fromOffchainPolicy,
+  ShadowClosedError,
+  STANDARD_PRESET,
   identityKeys,
   NonceReplayError,
   type Binding,
   type ChainInput,
+  type ExtraWrites,
   type Evaluation,
   type LivePolicy,
   type WalletRoles,
@@ -29,12 +33,28 @@ import {
   type Hex,
   type LimitWrite,
   type PolicyVersion,
+  type ShadowCheckRequest,
   Scope,
 } from "@horos/schema";
-import type { AdvisoryReason, CheckDeps, CheckPrincipal } from "./ports.js";
+import type { AdvisoryReason, CheckDeps, CheckPrincipal, LedgerWindowPolicy } from "./ports.js";
+
+/**
+ * The virtual ledger's window Policy for a PolicyVersion: its Preset's on-chain values, the Standard Preset's when the
+ * Preset is unknown. The same PolicyVersion drives `evaluate`, so the two never disagree.
+ */
+export function ledgerWindowPolicy(policyVersion: Pick<PolicyVersion, "presetVersion">): LedgerWindowPolicy {
+  const onchain = (findPreset(policyVersion.presetVersion) ?? STANDARD_PRESET).onchain;
+  return {
+    firstContactCeiling: onchain.firstContactCeiling,
+    walletPeriodCap: onchain.walletPeriodCap,
+    newPayeeCap: BigInt(onchain.newPayeeCap),
+    policyPeriodDays: BigInt(onchain.policyPeriodDays),
+  };
+}
 
 export const ADVISORY_PUBLIC_SCOPE = "advisory-public";
-export const DEFAULT_LIMIT_WRITE_WAIT_MS = 2000;
+/** 0: a Check does not wait for the limit write (NFR-1/AD-8 amendment 2026-09-29); it returns `limit_write: pending`. */
+export const DEFAULT_LIMIT_WRITE_WAIT_MS = 0;
 export const LIMIT_WRITE_POLL_MS = 100;
 
 export interface RunCheckOptions {
@@ -56,6 +76,18 @@ export type CheckOutcome =
     }
   | { readonly kind: "rate_limited"; readonly principal: CheckPrincipal };
 
+/** A shadow Check's outcome: decided, rate-limited, or refused because the Customer's PolicyWallet is bound. */
+export type ShadowCheckOutcome =
+  | Exclude<CheckOutcome, { readonly kind: "decided" }>
+  | { readonly kind: "decided"; readonly response: CheckResponse; readonly scope: Scope; readonly evaluation: Evaluation }
+  | { readonly kind: "shadow_closed" };
+
+/** The Customer and shadow Scope an API key resolved to. */
+export interface ShadowPrincipal {
+  readonly customerId: string;
+  readonly scope: string;
+}
+
 /** @internal */
 export type Auth =
   | {
@@ -63,9 +95,12 @@ export type Auth =
       readonly scope: Scope;
       readonly customerId: string;
       readonly nonce: Hex;
+      readonly policyWallet: Hex;
       /** False when both RPCs failed on `roles` and the signer matched the stored Payment address. */
       readonly rolesLive: boolean;
     }
+  /** A shadow Check (Story 3.4): authenticated by an API key, answered from the virtual ledger, always advisory. */
+  | { readonly kind: "shadow"; readonly scope: Scope; readonly customerId: string }
   | { readonly kind: "advisory"; readonly reason: AdvisoryReason };
 
 /** @internal */
@@ -105,11 +140,11 @@ async function authenticate<Tx>(
   const live = await roles();
   if (live.status === "fulfilled") {
     if (live.value.payment !== signer) return { kind: "advisory", reason: "wrong-signer" };
-    return { kind: "enforced", scope, customerId: binding.customerId, nonce: auth.nonce, rolesLive: true };
+    return { kind: "enforced", scope, customerId: binding.customerId, nonce: auth.nonce, policyWallet: req.policy_wallet, rolesLive: true };
   }
   // Both RPCs failed on roles: fall back to the Payment address verified at bind, and run stale.
   if (binding.paymentAddress !== signer) return { kind: "advisory", reason: "wrong-signer" };
-  return { kind: "enforced", scope, customerId: binding.customerId, nonce: auth.nonce, rolesLive: false };
+  return { kind: "enforced", scope, customerId: binding.customerId, nonce: auth.nonce, policyWallet: req.policy_wallet, rolesLive: false };
 }
 
 function isBound(binding: Binding | undefined, wallet: Hex): binding is Binding {
@@ -126,6 +161,7 @@ export async function chainInput<Tx>(
   counterparty: Hex,
   reads: LiveReads,
 ): Promise<{ readonly chain?: ChainInput; readonly chainState: ChainState }> {
+  if (auth.kind === "shadow") throw new Error("a shadow Check reads the virtual ledger, not the chain");
   const { remaining, policy, hasCode } = reads;
   const rolesOk = auth.kind !== "enforced" || auth.rolesLive;
   if (rolesOk && remaining.status === "fulfilled" && policy.status === "fulfilled" && hasCode.status === "fulfilled") {
@@ -209,18 +245,49 @@ async function run<Tx>(req: CheckRequest, deps: CheckDeps<Tx>, opts: RunCheckOpt
 
   const auth: Auth = forceAdvisory ? { kind: "advisory", reason: "nonce-race" } : await authenticate(req, deps, nowMs, binding, roles);
 
-  const scope: Scope = auth.kind === "enforced" ? auth.scope : ADVISORY_PUBLIC_SCOPE;
-  const reads: LiveReads = { remaining: await remaining, policy: await livePolicy, hasCode: await hasCode };
-  // History and identity bindings only count in an enforced Scope: advisory-public input is anonymous, so one
-  // caller must not be able to change another's result. Only records sharing an identity key are read.
+  const reads = (async (): Promise<LiveReads> => ({ remaining: await remaining, policy: await livePolicy, hasCode: await hasCode }))();
+  const outcome = await decide(deps, auth, req, now, reads.then((r) => chainInput(deps, auth, a, r)), () => run(req, deps, opts, true));
+  // Only a shadow Check can be closed.
+  if (outcome.kind === "shadow_closed") throw new Error("an enforced or advisory Check cannot be shadow_closed");
+  return outcome;
+}
+
+/** The request fields every Check kind shares. */
+type CheckBody = Pick<CheckRequest, "counterparty" | "amount" | "declared_identity">;
+
+/**
+ * The common tail of every Check (enforced, shadow, advisory-public): inputs → core `evaluate` → one-transaction
+ * append (enforced: nonce + outbox intent; shadow: the virtual-ledger effect; advisory: nothing) → response.
+ */
+async function decide<Tx>(
+  deps: CheckDeps<Tx>,
+  auth: Auth,
+  req: CheckBody,
+  now: Date,
+  chainInputP: Promise<{ readonly chain?: ChainInput; readonly chainState: ChainState }>,
+  onNonceRace: () => Promise<CheckOutcome>,
+): Promise<Extract<CheckOutcome, { kind: "decided" }> | { readonly kind: "shadow_closed" }> {
+  const nowMs = now.getTime();
+  const a = req.counterparty;
+  const scope: Scope = auth.kind === "advisory" ? ADVISORY_PUBLIC_SCOPE : auth.scope;
+  // History and identity bindings only count in a Customer's own Scope (enforced, or its shadow Scope): advisory-public
+  // input is anonymous, so one caller must not be able to change another's result. Only records sharing an identity key
+  // are read. A shadow Scope's history is its virtual ledger; it has no outbox, so no pending intent.
   const keys = identityKeys(req.declared_identity);
+  const ledger = deps.ledger;
+  const history =
+    auth.kind === "enforced"
+      ? deps.hasHistory(scope, a)
+      : auth.kind === "shadow" && ledger !== undefined
+        ? ledger.hasHistory(scope, a)
+        : Promise.resolve(false);
   const [{ chain, chainState }, lists, policyVersion, pendingIntentTarget, hasHistory, identityBindings] = await Promise.all([
-    chainInput(deps, auth, a, reads),
+    chainInputP,
     deps.lists(),
     policyFor(deps, scope),
     auth.kind === "enforced" ? deps.pendingIntentTarget(scope, a) : Promise.resolve(undefined),
-    auth.kind === "enforced" ? deps.hasHistory(scope, a) : Promise.resolve(false),
-    auth.kind === "enforced" && keys.length > 0 ? deps.identityBindings(scope, keys) : Promise.resolve([]),
+    history,
+    auth.kind !== "advisory" && keys.length > 0 ? deps.identityBindings(scope, keys) : Promise.resolve([]),
   ]);
 
   const evaluation = evaluate({
@@ -244,8 +311,8 @@ async function run<Tx>(req: CheckRequest, deps: CheckDeps<Tx>, opts: RunCheckOpt
     createdAt: toWireTime(now),
     trigger: "check",
     channel: "api",
-    customerId: auth.kind === "enforced" ? auth.customerId : ADVISORY_PUBLIC_CUSTOMER_ID,
-    ...(auth.kind === "enforced" ? { policyWallet: wallet } : {}),
+    customerId: auth.kind === "advisory" ? ADVISORY_PUBLIC_CUSTOMER_ID : auth.customerId,
+    ...(auth.kind === "enforced" ? { policyWallet: auth.policyWallet } : {}),
     counterparty: a,
     amount: BigInt(req.amount),
     ...(req.declared_identity === undefined ? {} : { declaredIdentity: req.declared_identity }),
@@ -258,23 +325,41 @@ async function run<Tx>(req: CheckRequest, deps: CheckDeps<Tx>, opts: RunCheckOpt
     evaluation,
   } as const;
 
-  if (auth.kind !== "enforced") await deps.ensureAdvisoryScope();
+  if (auth.kind === "advisory") await deps.ensureAdvisoryScope();
+  let extra: { nonce?: string; extraWrites?: ExtraWrites<Tx> } = {};
+  if (auth.kind === "enforced") {
+    extra = { nonce: auth.nonce, extraWrites: deps.outboxWrites(evaluation, { now, humanEpoch: chain?.view.humanEpoch ?? 0n }) };
+  } else if (auth.kind === "shadow") {
+    if (ledger === undefined) throw new Error("a shadow Check needs the virtual ledger");
+    // Virtual spend (AD-7): allow records the amount, cap the payable amount; hold and block spend nothing.
+    const spend = evaluation.decision === "allow" ? BigInt(req.amount) : evaluation.decision === "cap" ? (evaluation.payable ?? 0n) : 0n;
+    extra = {
+      extraWrites: ledger.apply(
+        scope,
+        a,
+        { ...(evaluation.outboxIntent === undefined ? {} : { intent: evaluation.outboxIntent }), spend },
+        now,
+        ledgerWindowPolicy(policyVersion),
+      ),
+    };
+  }
   let appended;
   try {
-    appended = await deps.records.append({
-      scope,
-      build: (seq, prevHash) => buildDecisionRecord(ctx, seq, prevHash),
-      ...(auth.kind === "enforced"
-        ? { nonce: auth.nonce, extraWrites: deps.outboxWrites(evaluation, { now, humanEpoch: chain?.view.humanEpoch ?? 0n }) }
-        : {}),
-    });
+    appended = await deps.records.append({ scope, build: (seq, prevHash) => buildDecisionRecord(ctx, seq, prevHash), ...extra });
   } catch (err) {
+    // The Customer's PolicyWallet was bound after the pre-check: the append rolled back, nothing was written.
+    if (err instanceof ShadowClosedError && auth.kind === "shadow") return { kind: "shadow_closed" };
     // A concurrent Check won the nonce: this one re-runs as advisory-public (AD-11).
-    if (err instanceof NonceReplayError && auth.kind === "enforced") return run(req, deps, opts, true);
+    if (err instanceof NonceReplayError && auth.kind === "enforced") {
+      const retried = await onNonceRace();
+      if (retried.kind !== "decided") throw new Error("the advisory re-run of a nonce race must decide");
+      return retried;
+    }
     throw err;
   }
   const record = appended.record;
 
+  // Only an enforced Check queues a chain write; shadow and advisory answers never do (`limit_write: none`).
   const limitWrite: LimitWrite = auth.kind === "enforced" ? await waitForLimitWrite(deps, scope, a, recordId) : "none";
   const txHash = limitWrite === "confirmed" ? await deps.intentTxHash(scope, a, recordId) : undefined;
 
@@ -295,7 +380,7 @@ async function run<Tx>(req: CheckRequest, deps: CheckDeps<Tx>, opts: RunCheckOpt
   });
 
   deps.log?.({
-    event: "check",
+    event: auth.kind === "shadow" ? "shadow-check" : "check",
     recordId,
     scope,
     trigger: "check",
@@ -313,4 +398,45 @@ async function run<Tx>(req: CheckRequest, deps: CheckDeps<Tx>, opts: RunCheckOpt
     evaluation,
     ...(auth.kind === "advisory" ? { advisoryReason: auth.reason } : {}),
   };
+}
+
+/**
+ * Run one shadow Check (Story 3.4, FR-28, AD-7, AD-25) for the Customer an API key resolved to. The same pipeline as
+ * `runCheck`, in the Customer's `shadow:<customerId>` Scope: the chain input is the virtual view (the ledger's
+ * `remaining(a)`, a live `hasCode(a)` and the shadow First-Contact Ceiling), the record is advisory, the ledger effect
+ * commits with the record, and nothing is queued for the chain (`limit_write: none`, no `tx_hash`). No
+ * `chain.remaining` / `chain.policy` / `chain.roles` read is made. Once the Customer's PolicyWallet is bound the answer
+ * is `shadow_closed` and nothing is written. `req` must already be a parsed `ShadowCheckRequest`.
+ */
+export async function runShadowCheck<Tx>(
+  req: ShadowCheckRequest,
+  principal: ShadowPrincipal,
+  deps: CheckDeps<Tx>,
+  opts: RunCheckOptions = {},
+): Promise<ShadowCheckOutcome> {
+  const ledger = deps.ledger;
+  if (ledger === undefined) throw new Error("runShadowCheck needs deps.ledger");
+  const scope = Scope.parse(principal.scope);
+  if (scope !== `shadow:${principal.customerId}`) throw new Error("the principal's scope is not its Customer's shadow Scope");
+  const p: CheckPrincipal = { kind: "shadow", customerId: principal.customerId };
+  if (opts.admit !== undefined && !opts.admit(p)) return { kind: "rate_limited", principal: p };
+  if (await ledger.isClosed(principal.customerId)) return { kind: "shadow_closed" };
+
+  const now = deps.now();
+  const a = req.counterparty;
+  const auth: Auth = { kind: "shadow", scope, customerId: principal.customerId };
+  const hasCode = settle(deps.chain.hasCode(a));
+  const input = (async () => {
+    // The window Policy comes from the Scope's active PolicyVersion, the one `evaluate` uses.
+    const windowPolicy = ledgerWindowPolicy(await policyFor(deps, scope));
+    const [view, code] = await Promise.all([ledger.remaining(scope, a, now, windowPolicy), hasCode]);
+    // Without a live hasCode answer, assume a contract payee (first contact holds) and say the view is not fully live.
+    const chain: ChainInput = {
+      view,
+      payeeIsContract: code.status === "fulfilled" ? code.value : true,
+      firstContactCeiling: windowPolicy.firstContactCeiling,
+    };
+    return { chain, chainState: code.status === "fulfilled" ? ("live" as const) : ("stale" as const) };
+  })();
+  return decide(deps, auth, req, now, input, () => Promise.reject(new Error("a shadow Check consumes no nonce")));
 }

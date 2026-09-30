@@ -1,9 +1,8 @@
-// The migrate command: migrations run under a fixed advisory lock, idempotently. Concurrency is proven on real
-// Postgres when HOROS_TEST_DATABASE_URL is set (CI); otherwise PGlite runs the command twice in sequence.
+// The migrate command: migrations run under a fixed advisory lock, idempotently: run twice in sequence on one
+// connection, and concurrently as a non-superuser migrator on the test Postgres server.
 import { randomBytes } from "node:crypto";
-import { PGlite } from "@electric-sql/pglite";
+import { emptyDb, testServerUrl, type TestClient } from "@horos/adapters/testing";
 import { appliedMigrationCount, connectPostgresSession, createLogger, MIGRATIONS_FOLDER, type HorosDb } from "@horos/adapters";
-import { drizzle } from "drizzle-orm/pglite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import pg from "pg";
@@ -12,21 +11,21 @@ import { main, MIGRATION_LOCK_KEY, migrateUnderLock, MigrationLockTimeoutError, 
 
 const MIGRATION_COUNT = (JSON.parse(readFileSync(join(MIGRATIONS_FOLDER, "meta", "_journal.json"), "utf8")) as { entries: unknown[] }).entries.length;
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
 
-describe("migrateUnderLock (PGlite, sequential)", () => {
+describe("migrateUnderLock (one connection, sequential)", () => {
   test("two runs both succeed; the schema is at the latest version and the lock is released", async () => {
-    const client = new PGlite();
+    const { client, db } = await emptyDb();
     clients.push(client);
-    const session = { db: drizzle(client) as unknown as HorosDb, query: (sql: string, params?: readonly unknown[]) => client.query<Record<string, unknown>>(sql, params === undefined ? undefined : [...params]) };
+    const session = { db, query: (sql: string, params?: readonly unknown[]) => client.query<Record<string, unknown>>(sql, params === undefined ? undefined : [...params]) };
     await migrateUnderLock(session);
     await migrateUnderLock(session);
     const applied = await client.query<{ n: number }>("SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations");
     expect(applied.rows[0]?.n).toBe(MIGRATION_COUNT);
-    const locks = await client.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory'");
+    const locks = await client.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())");
     expect(locks.rows[0]?.n).toBe(0);
     const grants = await client.query<{ usage: boolean; sel: boolean; del: boolean }>(
       `SELECT has_schema_privilege('horos_app', 'drizzle', 'USAGE') AS usage,
@@ -85,9 +84,9 @@ describe("main", () => {
   });
 });
 
-const REAL_URL = process.env["HOROS_TEST_DATABASE_URL"];
+const REAL_URL = testServerUrl();
 
-describe.skipIf(REAL_URL === undefined || REAL_URL === "")("migrate (real Postgres, non-superuser migrator, concurrent)", () => {
+describe("migrate (real Postgres, non-superuser migrator, concurrent)", () => {
   const suffix = randomBytes(6).toString("hex");
   const dbName = `horos_migrate_${suffix}`;
   const migrator = `horos_migrator_${suffix}`;
@@ -96,14 +95,14 @@ describe.skipIf(REAL_URL === undefined || REAL_URL === "")("migrate (real Postgr
   const migratorPw = randomBytes(12).toString("hex");
   const appPw = randomBytes(12).toString("hex");
   const urlAs = (user: string, pw: string) => {
-    const u = new URL(REAL_URL ?? "postgres://localhost/postgres");
+    const u = new URL(REAL_URL);
     u.username = user;
     u.password = pw;
     u.pathname = `/${dbName}`;
     return u.toString();
   };
   const admin = async <T>(fn: (c: pg.Client) => Promise<T>, database?: string): Promise<T> => {
-    const u = new URL(REAL_URL ?? "postgres://localhost/postgres");
+    const u = new URL(REAL_URL);
     if (database !== undefined) u.pathname = `/${database}`;
     const c = new pg.Client({ connectionString: u.toString() });
     await c.connect();
@@ -151,7 +150,7 @@ describe.skipIf(REAL_URL === undefined || REAL_URL === "")("migrate (real Postgr
       expect(r.rows[0]?.["u"]).toBe(appLogin);
       await expect(app.query("DELETE FROM drizzle.__drizzle_migrations")).rejects.toThrow(/permission denied/);
       await expect(app.query("DELETE FROM decision_record")).rejects.toThrow(/permission denied/);
-      const locks = await app.query("SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory'");
+      const locks = await app.query("SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())");
       expect(locks.rows[0]?.["n"]).toBe(0);
     } finally {
       await app.close();

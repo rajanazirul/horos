@@ -1,0 +1,10 @@
+{
+  "name": "horos",
+  "version": "0.0.0",
+  "description": "Horos quickstart: add a check() before your agent's USDC payments and route them through your own PolicyWallet, or start in advisory Shadow Mode. Deterministic steps run in the horos-quickstart CLI.",
+  "author": {
+    "name": "Horos"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["usdc", "agents", "payments", "policy", "arc"]
+}

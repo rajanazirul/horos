@@ -44,6 +44,13 @@ export class FixedWindowLimiter {
     return true;
   }
 
+  /** True when `key` has used its whole limit in the current window (counts nothing). */
+  exhausted(key: string, nowMs: number): boolean {
+    const start = nowMs - (nowMs % this.windowMs);
+    const w = this.windows.get(key);
+    return w !== undefined && w.start === start && w.count >= this.limit;
+  }
+
   /** Milliseconds from `nowMs` until the current window ends (every key's count resets then). */
   msUntilReset(nowMs: number): number {
     return this.windowMs - (nowMs % this.windowMs);

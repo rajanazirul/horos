@@ -11,8 +11,7 @@ import type { HorosDb } from "./db.js";
 export const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
 
 /**
- * Apply every pending migration. Works for node-postgres and PGlite handles: both drivers' migrators
- * run the same `dialect.migrate(readMigrationFiles(config), session)`, so the node-postgres one is used.
+ * Apply every pending migration on a node-postgres handle.
  */
 export async function runMigrations(db: HorosDb): Promise<void> {
   await migrate(db as unknown as NodePgDatabase, { migrationsFolder: MIGRATIONS_FOLDER });
@@ -29,7 +28,7 @@ export function bundledMigrationCount(): number {
  * exist yet. The app role can read it (migration 0006).
  */
 export async function appliedMigrationCount(db: HorosDb): Promise<number> {
-  // node-postgres and PGlite results both carry `rows`.
+  // node-postgres results carry `rows`.
   type Rows<T> = { readonly rows: readonly T[] };
   const exists = (await db.execute(sql`select to_regclass('drizzle.__drizzle_migrations')::text as t`)) as unknown as Rows<{ t: string | null }>;
   if (exists.rows[0]?.t == null) return 0;

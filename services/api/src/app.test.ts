@@ -1,8 +1,7 @@
-import { PGlite } from "@electric-sql/pglite";
-import { PostgresPolicyVersionStore, runMigrations } from "@horos/adapters";
+import { freshDb, type TestClient } from "@horos/adapters/testing";
+import { PostgresPolicyVersionStore } from "@horos/adapters";
 import { STANDARD_PRESET, toOffchainPolicy, type PolicyVersionStore } from "@horos/core";
 import { ErrorEnvelope, PolicyVersion, type OffchainPolicy } from "@horos/schema";
-import { drizzle } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, test } from "vitest";
 import { createApp } from "./app.js";
 import { PACKAGE_NAME, uuidv7 } from "./index.js";
@@ -11,16 +10,14 @@ const TOKEN = "test-admin-token-not-a-secret";
 const scope = "enforced:01926f3a-7b2c-7d4e-8f00-0123456789ab";
 const standard = toOffchainPolicy(STANDARD_PRESET.offchain);
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
 
 async function setup(wrap: (s: PolicyVersionStore) => PolicyVersionStore = (s) => s) {
-  const client = new PGlite();
+  const { client, db } = await freshDb();
   clients.push(client);
-  const db = drizzle(client);
-  await runMigrations(db);
   const store = new PostgresPolicyVersionStore(db);
   let t = Date.parse("2026-09-26T10:00:00.000Z");
   const app = createApp({

@@ -1,11 +1,13 @@
-// Chain-event indexer (Story 2.7, AD-9, AD-24, amendment 2026-09-27). Each tick, for every bound enforced
-// binding: tail the PolicyWallet's events from the cursor to `latest − confirmations` in chunks, join each
+// Chain-event indexer (Story 2.7, AD-9, AD-24, amendment 2026-09-27). Each full tick, for every bound enforced
+// binding (in the fast lane only those with a write in flight, AD-20 amendment 2026-09-29), with one `latestBlock`
+// read per pass: tail the PolicyWallet's events from the cursor to `latest − confirmations` in chunks, join each
 // Horos write to its in-flight outbox intent by `recordHash` (→ `confirmed` WriteReceipts), record `Paid`
 // history, append one ExternalRecord per transaction with unmatched events, and fold every Counterparty event
-// into the mirror. Then derive receipts from the outbox's final states. The indexer is the only writer of
-// the mirror, WriteReceipts, `Paid` history and ExternalRecords; every write is idempotent, so a chunk that
-// fails part-way is simply indexed again.
-import type { BoundWallet, HorosTx, MirrorEvent, PostgresIndexerStore, PostgresJobStore } from "@horos/adapters";
+// into the mirror. Then (full tick only) derive receipts from the outbox's final states. The indexer is the only
+// writer of the mirror, WriteReceipts, `Paid` history and ExternalRecords; every write is idempotent, so a chunk
+// that fails part-way is simply indexed again. A wallet whose read is rate-limited by the RPC cools down (both
+// lanes skip it for `rateLimitCooldownMs`, per indexer instance), so a saturated shared limit can recover.
+import { isRateLimited, type BoundWallet, type HorosTx, type MirrorEvent, type PostgresIndexerStore, type PostgresJobStore } from "@horos/adapters";
 import { buildExternalRecord, type ChainReader, type Notifier, type OutboxIntentRow, type PolicyWalletLog, type RecordStore, type WalletRoles } from "@horos/core";
 import { HUMAN_ONLY_EVENTS, redactUrls, toWireTime, ZERO_BYTES32, type ExternalActor, type Hex } from "@horos/schema";
 
@@ -25,8 +27,10 @@ export interface IndexerDeps {
   readonly confirmations?: bigint;
   /** Blocks per `logs` request. Default and maximum 2000. The reader splits a chunk whose logs exceed the RPC's result cap. */
   readonly chunkSize?: bigint;
-  /** Chunks per wallet per tick. Default 50. */
+  /** Chunks per wallet per tick. Default 10. */
   readonly maxChunksPerTick?: number;
+  /** How long a wallet is skipped after a rate-limited read. Default 30 s. */
+  readonly rateLimitCooldownMs?: number;
   /** Delivery attempts per alert job before it stays failed. Default 10. */
   readonly alertMaxAttempts?: number;
 }
@@ -43,6 +47,11 @@ export interface WalletIndexReport {
   /** Unrecognised-write alert jobs ensured (delivered by the alert step). */
   readonly alerts: number;
   readonly error?: string;
+  /**
+   * Set when the wallet is cooling down after a rate-limited read: with `error` on the pass that hit the limit,
+   * without it on the passes that skipped the wallet (no chain call).
+   */
+  readonly coolingDownUntil?: Date;
 }
 
 export interface IndexerReport {
@@ -55,6 +64,8 @@ export interface IndexerReport {
 }
 
 const MAX_CHUNK = 2000n;
+export const DEFAULT_MAX_CHUNKS_PER_TICK = 10;
+export const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 30_000;
 const errMessage = (err: unknown): string => redactUrls(err instanceof Error ? err.message : String(err));
 
 /** The first block at which `wallet` has code (binary search on `hasCodeAt`). Throws when it has none at `latest`. */
@@ -131,7 +142,22 @@ function byTx(logs: readonly PolicyWalletLog[]): PolicyWalletLog[][] {
 export function createIndexer(d: IndexerDeps) {
   const confirmations = d.confirmations ?? 1n;
   const chunkSize = d.chunkSize === undefined ? MAX_CHUNK : d.chunkSize < 1n ? 1n : d.chunkSize > MAX_CHUNK ? MAX_CHUNK : d.chunkSize;
-  const maxChunks = d.maxChunksPerTick ?? 50;
+  const maxChunks = d.maxChunksPerTick ?? DEFAULT_MAX_CHUNKS_PER_TICK;
+  const cooldownMs = d.rateLimitCooldownMs ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+  /** Wallet → end of its rate-limit cooldown (ms). In memory: a restart simply retries. */
+  const coolingDown = new Map<Hex, number>();
+  const cooldownOf = (w: Hex, now: Date): number | undefined => {
+    const until = coolingDown.get(w);
+    if (until !== undefined && now.getTime() >= until) coolingDown.delete(w);
+    return until !== undefined && now.getTime() < until ? until : undefined;
+  };
+  /** Start a cooldown for `w` when `err` is a rate limit; returns its end, else undefined. */
+  const coolDown = (w: Hex, err: unknown, now: Date): Date | undefined => {
+    if (!isRateLimited(err)) return undefined;
+    const until = now.getTime() + cooldownMs;
+    coolingDown.set(w, until);
+    return new Date(until);
+  };
 
   /** Who sent `txHash`: from a Human-only / ownership event, else `tx.from` against the role holders at the block. */
   async function actorOf(wallet: Hex, events: readonly PolicyWalletLog[], block: bigint, txHash: Hex): Promise<{ actor: ExternalActor; address: Hex }> {
@@ -261,12 +287,11 @@ export function createIndexer(d: IndexerDeps) {
     }
   }
 
-  async function indexWallet(w: BoundWallet, now: Date): Promise<WalletIndexReport> {
+  async function indexWallet(w: BoundWallet, latest: bigint, now: Date): Promise<WalletIndexReport> {
     const counts = { confirmed: 0, external: 0, paid: 0, alerts: 0 };
     let chunks = 0;
     let next: bigint | undefined;
     try {
-      const latest = await d.reader.latestBlock();
       let cursor = await d.store.cursor(w.policyWallet);
       if (cursor === undefined) {
         // First run: start at the deploy block (the wallet has no events before it).
@@ -287,6 +312,7 @@ export function createIndexer(d: IndexerDeps) {
       }
       return { policyWallet: w.policyWallet, scope: w.scope, nextBlock: cursor, chunks, ...counts };
     } catch (err) {
+      const until = coolDown(w.policyWallet, err, now);
       return {
         policyWallet: w.policyWallet,
         scope: w.scope,
@@ -294,6 +320,7 @@ export function createIndexer(d: IndexerDeps) {
         chunks,
         ...counts,
         error: errMessage(err),
+        ...(until === undefined ? {} : { coolingDownUntil: until }),
       };
     }
   }
@@ -330,11 +357,48 @@ export function createIndexer(d: IndexerDeps) {
     return { alertsDelivered, alertErrors };
   }
 
+  /**
+   * Index `wallets` against one `latestBlock` read for the whole pass. One wallet's error never stops the others.
+   * A wallet cooling down is reported with `coolingDownUntil` and skipped (no chain call; none at all when every
+   * wallet is cooling down).
+   */
+  async function indexWallets(list: readonly BoundWallet[], now: Date): Promise<WalletIndexReport[]> {
+    const empty = (w: BoundWallet) => ({ policyWallet: w.policyWallet, scope: w.scope, chunks: 0, confirmed: 0, external: 0, paid: 0, alerts: 0 });
+    const skipped = new Map<Hex, Date>();
+    for (const w of list) {
+      const until = cooldownOf(w.policyWallet, now);
+      if (until !== undefined) skipped.set(w.policyWallet, new Date(until));
+    }
+    const due = list.filter((w) => !skipped.has(w.policyWallet));
+    const reports = new Map<BoundWallet, WalletIndexReport>();
+    if (due.length > 0) {
+      let latest: bigint | undefined;
+      try {
+        latest = await d.reader.latestBlock();
+      } catch (err) {
+        const error = errMessage(err);
+        for (const w of due) {
+          const until = coolDown(w.policyWallet, err, now);
+          reports.set(w, { ...empty(w), error, ...(until === undefined ? {} : { coolingDownUntil: until }) });
+        }
+      }
+      if (latest !== undefined) for (const w of due) reports.set(w, await indexWallet(w, latest, now));
+    }
+    return list.map((w) => {
+      const until = skipped.get(w.policyWallet);
+      return until !== undefined ? { ...empty(w), coolingDownUntil: until } : (reports.get(w) as WalletIndexReport);
+    });
+  }
+
   return {
+    /** The fast lane (AD-20): index only `wallets` (those with a write in flight); no reconcile, no alert delivery. */
+    indexWallets,
+    /** One fast-lane pass over the wallets with a write in flight (`walletsWithSubmittedIntents`). */
+    async runInflight(now: Date): Promise<Pick<IndexerReport, "wallets">> {
+      return { wallets: await indexWallets(await d.store.walletsWithSubmittedIntents(), now) };
+    },
     async run(now: Date): Promise<IndexerReport> {
-      const wallets: WalletIndexReport[] = [];
-      // One wallet's error never stops the others.
-      for (const w of await d.store.boundWallets()) wallets.push(await indexWallet(w, now));
+      const wallets = await indexWallets(await d.store.boundWallets(), now);
       let reconciled = 0;
       let reconcileError: string | undefined;
       try {
@@ -353,7 +417,14 @@ export function createIndexer(d: IndexerDeps) {
   };
 }
 
-/** One indexer pass (`createIndexer(deps).run(now)`). */
+export type Indexer = ReturnType<typeof createIndexer>;
+
+/** One indexer pass (`createIndexer(deps).run(now)`); a fresh instance, so no cooldown carries over. */
 export async function runIndexer(deps: IndexerDeps, now: Date): Promise<IndexerReport> {
   return createIndexer(deps).run(now);
+}
+
+/** One fast-lane indexer pass over the wallets with a write in flight (`walletsWithSubmittedIntents`). */
+export async function runInflightIndexer(deps: IndexerDeps, now: Date): Promise<Pick<IndexerReport, "wallets">> {
+  return createIndexer(deps).runInflight(now);
 }

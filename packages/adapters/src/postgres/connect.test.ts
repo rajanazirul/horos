@@ -29,14 +29,11 @@ test("with the default handler, or a throwing handler, emitting error does not t
 });
 
 test("pingPostgres: true on a live database; false (not a rejection) on a hanging or failing one", async () => {
-  const { PGlite } = await import("@electric-sql/pglite");
-  const { drizzle } = await import("drizzle-orm/pglite");
+  const { emptyDb } = await import("./test-db.js");
   const { pingPostgres } = await import("./connect.js");
-  const client = new PGlite();
+  const { client, db } = await emptyDb();
   closers.push(() => client.close());
-  // PGlite boots lazily; under full-repo parallel load its first query can outlast the default budget.
-  await client.waitReady;
-  expect(await pingPostgres(drizzle(client) as never, 30_000)).toBe(true);
+  expect(await pingPostgres(db, 30_000)).toBe(true);
 
   const hanging = { transaction: () => new Promise<never>(() => {}) } as never;
   const started = Date.now();

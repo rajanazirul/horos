@@ -1,0 +1,43 @@
+# Local Postgres for development and tests. Production runs on Railway (docs/runbooks/railway-deploy.md); nothing
+# here is used there. Both ports bind to 127.0.0.1 only. Start with `docker compose up -d`.
+name: horos
+
+services:
+  # Dev database for running the api and worker locally. Roles mirror production (runbook step 2); see .env.example.
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: horos-dev
+      POSTGRES_DB: horos
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./tools/dev/postgres-init.sql:/docker-entrypoint-initdb.d/10-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d horos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Throwaway database server for vitest (HOROS_TEST_DATABASE_URL). Data lives in RAM and durability is off: tests
+  # create one database per test from a migrated template and drop it afterwards. Recreate the container to wipe it.
+  postgres-test:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: horos-test
+    command: >-
+      postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=500
+    ports:
+      - "127.0.0.1:54329:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:

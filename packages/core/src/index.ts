@@ -25,4 +25,5 @@ export * from "./ports/outbox.js";
 export * from "./ports/account.js";
 export * from "./ports/key-provisioner.js";
 export * from "./status/fold.js";
+export * from "./status/shadow-outcome.js";
 export * from "./ports/read-store.js";

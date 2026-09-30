@@ -427,3 +427,80 @@ export const indexerCursor = pgTable(
     check("indexer_cursor_next_block_nonnegative", sql`${t.nextBlock} >= 0`),
   ],
 );
+
+const SHADOW_SCOPE_RE = "^shadow:[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
+
+/**
+ * Shadow Mode API keys (Story 3.4, AD-25). Only the sha256 of a key is stored. A sign-up revokes the Customer's
+ * active key and inserts a new one, so at most one key per Customer is active. Rows are never deleted.
+ */
+export const shadowApiKey = pgTable(
+  "shadow_api_key",
+  {
+    keyHash: text("key_hash").primaryKey(),
+    customerId: uuid("customer_id")
+      .notNull()
+      .references((): AnyPgColumn => customer.id),
+    scope: text("scope")
+      .notNull()
+      .references((): AnyPgColumn => scope.id),
+    createdAt: ts3("created_at").notNull(),
+    revokedAt: ts3("revoked_at"),
+  },
+  (t) => [
+    uniqueIndex("shadow_api_key_active_unique").on(t.customerId).where(sql`revoked_at IS NULL`),
+    check("shadow_api_key_key_hash_valid", sql`${t.keyHash} ~ '^[0-9a-f]{64}$'`),
+    check("shadow_api_key_scope_valid", sql`${t.scope} ~ ${sql.raw(`'${SHADOW_SCOPE_RE}'`)}`),
+    check("shadow_api_key_scope_matches_customer", sql`${t.scope} = 'shadow:' || ${t.customerId}::text`),
+  ],
+);
+
+/**
+ * The shadow virtual ledger's per-Counterparty state (AD-7, AD-25): the virtual Registration, Limit and pin a shadow
+ * Scope's Decisions would have written on-chain. Shadow Scopes only; enforced code never reads it. Mutable.
+ */
+export const shadowLedgerCounterparty = pgTable(
+  "shadow_ledger_counterparty",
+  {
+    scope: text("scope")
+      .notNull()
+      .references((): AnyPgColumn => scope.id),
+    counterparty: text("counterparty").notNull(),
+    limit: numeric("limit", { precision: 78, scale: 0 }).notNull().default("0"),
+    registered: boolean("registered").notNull().default(false),
+    pinned: boolean("pinned").notNull().default(false),
+  },
+  (t) => [
+    primaryKey({ name: "shadow_ledger_counterparty_pkey", columns: [t.scope, t.counterparty] }),
+    check("shadow_ledger_counterparty_scope_valid", sql`${t.scope} ~ ${sql.raw(`'${SHADOW_SCOPE_RE}'`)}`),
+    check("shadow_ledger_counterparty_address_valid", sql`${t.counterparty} ~ '^0x[0-9a-f]{40}$'`),
+    check("shadow_ledger_counterparty_limit_nonnegative", sql`${t.limit} >= 0`),
+    check("shadow_ledger_counterparty_pinned_limit_zero", sql`NOT ${t.pinned} OR ${t.limit} = 0`),
+  ],
+);
+
+/**
+ * The shadow virtual ledger's day-bucket rings (AD-7): one row per `(scope, ring, slot_index)`, the Postgres form of
+ * the contract's `RollingWindow.Ring`. `ring` is `wallet`, `new-payee` or `cp:<address>`. Mutable.
+ */
+export const shadowLedgerSlot = pgTable(
+  "shadow_ledger_slot",
+  {
+    scope: text("scope")
+      .notNull()
+      .references((): AnyPgColumn => scope.id),
+    ring: text("ring").notNull(),
+    slotIndex: integer("slot_index").notNull(),
+    dayIndex: bigint("day_index", { mode: "number" }).notNull(),
+    amount: numeric("amount", { precision: 78, scale: 0 }).notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "shadow_ledger_slot_pkey", columns: [t.scope, t.ring, t.slotIndex] }),
+    check("shadow_ledger_slot_scope_valid", sql`${t.scope} ~ ${sql.raw(`'${SHADOW_SCOPE_RE}'`)}`),
+    check("shadow_ledger_slot_ring_valid", sql`${t.ring} IN ('wallet', 'new-payee') OR ${t.ring} ~ '^cp:0x[0-9a-f]{40}$'`),
+    check("shadow_ledger_slot_index_range", sql`${t.slotIndex} >= 0 AND ${t.slotIndex} <= 90`),
+    check("shadow_ledger_slot_index_matches_day", sql`${t.slotIndex} = ${t.dayIndex} % 91`),
+    check("shadow_ledger_slot_day_index_range", sql`${t.dayIndex} >= 0 AND ${t.dayIndex} <= 4294967295`),
+    check("shadow_ledger_slot_amount_range", sql`${t.amount} >= 0 AND ${t.amount} <= 26959946667150639794667015087019630673637144422540572481103610249215`),
+  ],
+);

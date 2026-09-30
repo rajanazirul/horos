@@ -1,4 +1,3 @@
-import type { PGlite } from "@electric-sql/pglite";
 import { buildDecisionRecord, evaluate, SeqConflictError, STANDARD_PRESET, toOffchainPolicy, type ChainView, type ListSnapshot, type PolicyVersionStore } from "@horos/core";
 import { CHECK_TYPES, checkDomain, toWireTime, type CheckMessage, type DeclaredIdentity, type Hex, type Scope } from "@horos/schema";
 import { privateKeyToAccount } from "viem/accounts";
@@ -10,9 +9,9 @@ import { PostgresIndexerStore } from "./indexer-store.js";
 import { PostgresOutboxStore, upsertIntent } from "./outbox-store.js";
 import { PostgresPolicyVersionStore } from "./policy-version-store.js";
 import { PostgresRecordStore } from "./record-store.js";
-import { freshDb } from "./test-db.js";
+import { freshDb, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });

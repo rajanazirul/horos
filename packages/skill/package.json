@@ -2,7 +2,7 @@
   "name": "@horos/skill",
   "version": "0.0.0",
   "private": true,
-  "description": "Claude Code skill and quickstart (placeholder)",
+  "description": "Claude Code plugin (horos-quickstart skill) and the horos-quickstart CLI: wire Horos into a USDC-paying agent in under ten minutes",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
@@ -11,17 +11,22 @@
       "default": "./dist/index.js"
     }
   },
+  "bin": {
+    "horos-quickstart": "./dist/cli.js"
+  },
   "files": [
-    "dist"
+    "dist",
+    "plugin"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-demo-list.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "lint": "eslint ."
   },
   "dependencies": {
+    "@horos/schema": "workspace:*",
     "@horos/sdk": "workspace:*",
-    "@horos/schema": "workspace:*"
+    "viem": "2.56.9"
   }
 }

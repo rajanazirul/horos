@@ -1,6 +1,5 @@
-// Test harness for Check pipeline tests: a PGlite database with a bound enforced Scope, a fake ChainReader with
+// Test harness for Check pipeline tests: a test Postgres database with a bound enforced Scope, a fake ChainReader with
 // a primary/secondary failover toggle, a controllable clock and signed-request builders. Test-only.
-import { PGlite } from "@electric-sql/pglite";
 import {
   outboxExtraWrites,
   PostgresAccountStore,
@@ -9,15 +8,15 @@ import {
   PostgresOutboxStore,
   PostgresPolicyVersionStore,
   PostgresRecordStore,
+  PostgresShadowStore,
   recoverCheckSigner,
-  runMigrations,
   uuidv7,
   type HorosDb,
   type HorosTx,
 } from "@horos/adapters";
+import { seededTemplate, type DbTemplate, type TestClient } from "@horos/adapters/testing";
 import type { ChainReader, ChainView, ListSnapshot, LivePolicy, ProvisionedKeys, WalletRoles } from "@horos/core";
 import { CHECK_TYPES, checkDomain, checkMessageFromRequest, toWireTime, type CheckRequest, type DeclaredIdentity, type Hex } from "@horos/schema";
-import { drizzle } from "drizzle-orm/pglite";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import type { CheckDeps } from "./ports.js";
 
@@ -132,7 +131,7 @@ export const sdnList = (lastVerifiedAt: number): ListSnapshot => ({
 });
 
 export interface Harness {
-  readonly client: PGlite;
+  readonly client: TestClient;
   readonly db: HorosDb;
   readonly chain: FakeChain;
   readonly scope: string;
@@ -145,38 +144,38 @@ export interface Harness {
   readonly records: PostgresRecordStore;
   readonly policies: PostgresPolicyVersionStore;
   readonly indexer: PostgresIndexerStore;
+  /** The shadow store behind `deps.ledger` (Story 3.4). */
+  readonly shadow: PostgresShadowStore;
   deps: CheckDeps<HorosTx>;
 }
 
 export interface Template {
-  readonly dump: Blob;
+  readonly db: DbTemplate;
   readonly scope: string;
   readonly customerId: string;
 }
 let template: Promise<Template> | undefined;
 
-/** Migrate and bind once per test file, then load each test's database from the dump (much cheaper than migrating). */
+/** Onboard and bind once per test file, then copy each test's database from that template (much cheaper). */
 export function loadTemplate(): Promise<Template> {
   template ??= (async () => {
-    const client = new PGlite();
-    const db = drizzle(client) as unknown as HorosDb;
-    await runMigrations(db);
-    const now = new Date(NOW_MS);
-    const accounts = new PostgresAccountStore(db);
-    const { binding } = await accounts.onboard({ paymentAddress: PAY, webhookUrl: "", now });
-    await accounts.setKeys(binding.customerId, KEYS, now);
-    const bound = await accounts.bind(binding.customerId, WALLET, now);
-    const dump = await client.dumpDataDir("none");
-    await client.close();
-    return { dump, scope: bound.scopeId, customerId: binding.customerId };
+    let ids = { scope: "", customerId: "" };
+    const db = await seededTemplate(async (seedDb) => {
+      const now = new Date(NOW_MS);
+      const accounts = new PostgresAccountStore(seedDb);
+      const { binding } = await accounts.onboard({ paymentAddress: PAY, webhookUrl: "", now });
+      await accounts.setKeys(binding.customerId, KEYS, now);
+      const bound = await accounts.bind(binding.customerId, WALLET, now);
+      ids = { scope: bound.scopeId, customerId: binding.customerId };
+    });
+    return { db, ...ids };
   })();
   return template;
 }
 
 export async function harness(opts: { limitWriteWaitMs?: number } = {}): Promise<Harness> {
   const t = await loadTemplate();
-  const client = new PGlite({ loadDataDir: t.dump });
-  const db = drizzle(client) as unknown as HorosDb;
+  const { client, db } = await t.db.fresh();
   const clock = { ms: NOW_MS };
   const now = () => new Date(clock.ms);
   const accounts = new PostgresAccountStore(db);
@@ -188,6 +187,7 @@ export async function harness(opts: { limitWriteWaitMs?: number } = {}): Promise
   const policies = new PostgresPolicyVersionStore(db);
   const indexer = new PostgresIndexerStore(db);
   const inputs = new PostgresCheckInputs(db);
+  const shadow = new PostgresShadowStore(db);
   const h: Harness = {
     client,
     db,
@@ -200,6 +200,7 @@ export async function harness(opts: { limitWriteWaitMs?: number } = {}): Promise
     records,
     policies,
     indexer,
+    shadow,
     deps: undefined as unknown as CheckDeps<HorosTx>,
   };
   h.deps = {
@@ -227,6 +228,7 @@ export async function harness(opts: { limitWriteWaitMs?: number } = {}): Promise
       await h.onSleep?.(clock.ms - h.sleepStart);
     },
     limitWriteWaitMs: opts.limitWriteWaitMs ?? 0,
+    ledger: shadow,
   };
   return h;
 }

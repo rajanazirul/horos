@@ -1,5 +1,6 @@
-// Outbox sender (AD-8, AD-15, Story 2.6). Each tick: recover crashed sends, poll submitted writes for their
-// tx hash, then claim due intents one lane at a time. At send time the chain is re-read and the intent is
+// Outbox sender (AD-8, AD-15, Story 2.6). Each full tick: recover crashed sends, poll submitted writes for their
+// tx hash, then claim due intents one lane at a time. The fast lane (AD-20) runs `claim` every wake and `poll` on
+// its own cadence. At send time the chain is re-read and the intent is
 // converted: pin → `pin`; unregistered → Hard Rules re-check, then `register(min(target, live FCC))`;
 // registered and tighter → `tighten(target, epoch)`; otherwise `noop`. Every write is pre-flighted with
 // `eth_call` from the signing role. There is no Raise path: no `setLimit`, and `tighten` only below the Limit.
@@ -197,56 +198,69 @@ export function createOutboxSender(d: OutboxSenderDeps) {
     return { id: intent.id, kind: "submitted", fn: call.fn, txId };
   }
 
+  /** Poll every submitted intent still without a tx hash for its Circle status. No submitted intent: no Circle call. */
+  async function poll(now: Date): Promise<OutboxReport["polled"]> {
+    const polled: OutboxReport["polled"][number][] = [];
+    for (const intent of await d.outbox.listAwaitingTx()) {
+      if (intent.circleTxId === null) continue;
+      let status;
+      try {
+        status = await d.writer.status(intent.circleTxId);
+      } catch {
+        polled.push({ id: intent.id, kind: "waiting" });
+        continue;
+      }
+      try {
+        switch (status.state) {
+          case "pending":
+            polled.push({ id: intent.id, kind: "waiting" });
+            break;
+          case "complete":
+            // Stays `submitted`: only the Story 2.7 indexer confirms (AD-24).
+            await d.outbox.markTxHash(intent.id, status.txHash, now);
+            polled.push({ id: intent.id, kind: "tx-hash" });
+            break;
+          case "failed":
+            polled.push(await retry(intent, `write failed: ${status.error}`, now));
+            break;
+          case "denied":
+          case "cancelled":
+            polled.push(await terminal(intent, status.state === "denied" ? "CircleDenied" : "CircleCancelled", now));
+            break;
+        }
+      } catch (err) {
+        // One bad row never aborts the pass; it is polled again next tick.
+        polled.push({ id: intent.id, kind: "waiting", error: errMessage(err) });
+      }
+    }
+    return polled;
+  }
+
+  /** The claim step: claim and send due intents, one lane at a time, up to `maxPerTick`. */
+  async function claim(now: Date): Promise<IntentOutcome[]> {
+    const processed: IntentOutcome[] = [];
+    const max = d.maxPerTick ?? 20;
+    for (let i = 0; i < max; i++) {
+      const intent = await d.outbox.claimNext(now);
+      if (intent === undefined) break;
+      try {
+        processed.push(await process(intent, now));
+      } catch (err) {
+        // e.g. markSubmitted failed: the intent stays `sending` and recoverStale re-queues it later.
+        processed.push({ id: intent.id, kind: "retry", error: errMessage(err), attempts: intent.attempts });
+      }
+    }
+    return processed;
+  }
+
   return {
+    poll,
+    claim,
+    /** The full pass: recover crashed sends, poll submitted writes, then claim. */
     async run(now: Date): Promise<OutboxReport> {
       const recovered = await d.outbox.recoverStale(new Date(now.getTime() - (d.staleSendMs ?? 10 * 60 * 1000)), now);
-
-      const polled: OutboxReport["polled"][number][] = [];
-      for (const intent of await d.outbox.listAwaitingTx()) {
-        if (intent.circleTxId === null) continue;
-        let status;
-        try {
-          status = await d.writer.status(intent.circleTxId);
-        } catch {
-          polled.push({ id: intent.id, kind: "waiting" });
-          continue;
-        }
-        try {
-          switch (status.state) {
-            case "pending":
-              polled.push({ id: intent.id, kind: "waiting" });
-              break;
-            case "complete":
-              // Stays `submitted`: only the Story 2.7 indexer confirms (AD-24).
-              await d.outbox.markTxHash(intent.id, status.txHash, now);
-              polled.push({ id: intent.id, kind: "tx-hash" });
-              break;
-            case "failed":
-              polled.push(await retry(intent, `write failed: ${status.error}`, now));
-              break;
-            case "denied":
-            case "cancelled":
-              polled.push(await terminal(intent, status.state === "denied" ? "CircleDenied" : "CircleCancelled", now));
-              break;
-          }
-        } catch (err) {
-          // One bad row never aborts the pass; it is polled again next tick.
-          polled.push({ id: intent.id, kind: "waiting", error: errMessage(err) });
-        }
-      }
-
-      const processed: IntentOutcome[] = [];
-      const max = d.maxPerTick ?? 20;
-      for (let i = 0; i < max; i++) {
-        const intent = await d.outbox.claimNext(now);
-        if (intent === undefined) break;
-        try {
-          processed.push(await process(intent, now));
-        } catch (err) {
-          // e.g. markSubmitted failed: the intent stays `sending` and recoverStale re-queues it later.
-          processed.push({ id: intent.id, kind: "retry", error: errMessage(err), attempts: intent.attempts });
-        }
-      }
+      const polled = await poll(now);
+      const processed = await claim(now);
       return { recovered, polled, processed };
     },
   };

@@ -1,13 +1,12 @@
-import type { PGlite } from "@electric-sql/pglite";
 import { keccakHex } from "@horos/schema";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, test } from "vitest";
 import { uuidv7 } from "../ids.js";
 import { PostgresListStore } from "../postgres/list-store.js";
-import { freshDb } from "../postgres/test-db.js";
+import { freshDb, type TestClient } from "../postgres/test-db.js";
 import { DEMO_LIST_LABEL, DEMO_LIST_PATH, demoListContent, loadDemoList, parseDemoList, readDemoList } from "./demo-list.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });

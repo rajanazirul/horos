@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, test } from "vitest";
-import type { PGlite } from "@electric-sql/pglite";
 import { runMigrations } from "./migrate.js";
-import { freshDb } from "./test-db.js";
+import { emptyDb, freshDb, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
@@ -36,16 +35,15 @@ describe("migrations", () => {
     const { db, client } = await setup();
     await runMigrations(db);
     const n = await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
-    expect(n.rows[0]?.n).toBe(7);
+    expect(n.rows[0]?.n).toBe(8);
   });
 
   test("the migration's role creation tolerates a pre-existing horos_app", async () => {
-    const { PGlite } = await import("@electric-sql/pglite");
-    const { drizzle } = await import("drizzle-orm/pglite");
-    const client = new PGlite();
+    // Roles are cluster-wide, so on the shared test server horos_app already exists before this database migrates.
+    const { client, db } = await emptyDb();
     clients.push(client);
-    await client.exec(`CREATE ROLE horos_app NOLOGIN`);
-    await runMigrations(drizzle(client));
+    await client.exec(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'horos_app') THEN CREATE ROLE horos_app NOLOGIN; END IF; END $$`);
+    await runMigrations(db);
     const role = await client.query(`SELECT 1 FROM pg_roles WHERE rolname = 'horos_app'`);
     expect(role.rows).toHaveLength(1);
   });
@@ -78,7 +76,7 @@ describe("horos_app role", () => {
 });
 
 describe("migration 0001 (lists and jobs)", () => {
-  const grantsOf = async (client: PGlite, table: string) =>
+  const grantsOf = async (client: TestClient, table: string) =>
     (
       await client.query<{ privilege_type: string }>(
         `SELECT privilege_type FROM information_schema.role_table_grants
@@ -93,7 +91,7 @@ describe("migration 0001 (lists and jobs)", () => {
     expect(await grantsOf(client, "list_source")).toEqual(["INSERT", "SELECT", "UPDATE"]);
     expect(await grantsOf(client, "job")).toEqual(["INSERT", "SELECT", "UPDATE"]);
     const n = await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
-    expect(n.rows[0]?.n).toBe(7);
+    expect(n.rows[0]?.n).toBe(8);
   });
 
   test("as horos_app, list_snapshot cannot be updated or deleted; job and list_source can be updated", async () => {
@@ -140,7 +138,7 @@ describe("migration 0001 (lists and jobs)", () => {
 });
 
 describe("migration 0002 (scopes and records)", () => {
-  const grantsOf = async (client: PGlite, table: string) =>
+  const grantsOf = async (client: TestClient, table: string) =>
     (
       await client.query<{ privilege_type: string }>(
         `SELECT privilege_type FROM information_schema.role_table_grants
@@ -212,7 +210,7 @@ describe("migration 0002 (scopes and records)", () => {
 });
 
 describe("migration 0003 (accounts and outbox)", () => {
-  const grantsOf = async (client: PGlite, table: string) =>
+  const grantsOf = async (client: TestClient, table: string) =>
     (
       await client.query<{ privilege_type: string }>(
         `SELECT privilege_type FROM information_schema.role_table_grants
@@ -264,7 +262,7 @@ describe("migration 0003 (accounts and outbox)", () => {
 });
 
 describe("migration 0004 (indexer, receipts, mirror)", () => {
-  const grantsOf = async (client: PGlite, table: string) =>
+  const grantsOf = async (client: TestClient, table: string) =>
     (
       await client.query<{ privilege_type: string }>(
         `SELECT privilege_type FROM information_schema.role_table_grants
@@ -351,5 +349,76 @@ describe("migration 0004 (indexer, receipts, mirror)", () => {
     await expect(
       client.exec(`INSERT INTO counterparty_mirror (scope, address, pinned, "limit", last_block, last_log_index, updated_at) VALUES ('${SCOPE}', '${CP}', true, 5, 1, 0, now())`),
     ).rejects.toThrow(/counterparty_mirror_pinned_limit_zero/);
+  });
+});
+
+describe("migration 0007 (shadow mode)", () => {
+  const grantsOf = async (client: TestClient, table: string) =>
+    (
+      await client.query<{ privilege_type: string }>(
+        `SELECT privilege_type FROM information_schema.role_table_grants
+         WHERE grantee = 'horos_app' AND table_name = $1 ORDER BY privilege_type`,
+        [table],
+      )
+    ).rows.map((r) => r.privilege_type);
+  const CUSTOMER = "01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80";
+  const SCOPE = `shadow:${CUSTOMER}`;
+  const CP = `0x${"1".repeat(40)}`;
+  const HASH = "a".repeat(64);
+
+  test("horos_app holds exactly SELECT, INSERT, UPDATE on the three shadow tables", async () => {
+    const { client } = await setup();
+    for (const t of ["shadow_api_key", "shadow_ledger_counterparty", "shadow_ledger_slot"]) {
+      expect(await grantsOf(client, t), t).toEqual(["INSERT", "SELECT", "UPDATE"]);
+    }
+  });
+
+  test("as horos_app, rows can be inserted and updated but never deleted", async () => {
+    const { client } = await setup();
+    await client.exec(`SET ROLE horos_app`);
+    await client.exec(`INSERT INTO customer (id, payment_address) VALUES ('${CUSTOMER}', '0x${"2".repeat(40)}')`);
+    await client.exec(`INSERT INTO scope (id, kind, customer_id) VALUES ('${SCOPE}', 'shadow', '${CUSTOMER}')`);
+    await client.exec(`INSERT INTO shadow_api_key (key_hash, customer_id, scope, created_at) VALUES ('${HASH}', '${CUSTOMER}', '${SCOPE}', now())`);
+    await client.exec(`UPDATE shadow_api_key SET revoked_at = now()`);
+    await client.exec(`INSERT INTO shadow_ledger_counterparty (scope, counterparty, "limit", registered) VALUES ('${SCOPE}', '${CP}', 5, true)`);
+    await client.exec(`UPDATE shadow_ledger_counterparty SET "limit" = 0, pinned = true`);
+    await client.exec(`INSERT INTO shadow_ledger_slot (scope, ring, slot_index, day_index, amount) VALUES ('${SCOPE}', 'wallet', ${20_721 % 91}, 20721, 5)`);
+    await client.exec(`UPDATE shadow_ledger_slot SET amount = 6`);
+    for (const t of ["shadow_api_key", "shadow_ledger_counterparty", "shadow_ledger_slot"]) {
+      await expect(client.exec(`DELETE FROM ${t}`), t).rejects.toThrow(/permission denied/);
+      await expect(client.exec(`TRUNCATE ${t}`), t).rejects.toThrow(/permission denied/);
+    }
+    await client.exec(`RESET ROLE`);
+  });
+
+  test("checks: shadow scopes only, one active key per Customer, canonical slot index, uint224 amounts, pinned means 0", async () => {
+    const { client } = await setup();
+    await client.exec(`INSERT INTO customer (id, payment_address) VALUES ('${CUSTOMER}', '0x${"2".repeat(40)}')`);
+    await client.exec(`INSERT INTO scope (id, kind, customer_id) VALUES ('${SCOPE}', 'shadow', '${CUSTOMER}')`);
+    await client.exec(`INSERT INTO scope (id, kind) VALUES ('advisory-public', 'advisory-public')`);
+    const key = (hash: string, scope = SCOPE) =>
+      `INSERT INTO shadow_api_key (key_hash, customer_id, scope, created_at) VALUES ('${hash}', '${CUSTOMER}', '${scope}', now())`;
+    await expect(client.exec(key("A".repeat(64)))).rejects.toThrow(/shadow_api_key_key_hash_valid/);
+    await expect(client.exec(key(HASH, "advisory-public"))).rejects.toThrow(/shadow_api_key_scope_(valid|matches_customer)/);
+    // A key's Scope must be its own Customer's shadow Scope.
+    const OTHER = "01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f81";
+    await client.exec(`INSERT INTO scope (id, kind, customer_id) VALUES ('shadow:${OTHER}', 'shadow', '${OTHER}')`);
+    await expect(client.exec(key(HASH, `shadow:${OTHER}`))).rejects.toThrow(/shadow_api_key_scope_matches_customer/);
+    await client.exec(key(HASH));
+    await expect(client.exec(key("b".repeat(64)))).rejects.toThrow(/shadow_api_key_active_unique/);
+    await client.exec(`UPDATE shadow_api_key SET revoked_at = now()`);
+    await client.exec(key("b".repeat(64)));
+
+    const slot = (ring: string, index: number, day: number, amount: string, scope = SCOPE) =>
+      `INSERT INTO shadow_ledger_slot (scope, ring, slot_index, day_index, amount) VALUES ('${scope}', '${ring}', ${index}, ${day}, ${amount})`;
+    await expect(client.exec(slot("wallet", 0, 20721, "1"))).rejects.toThrow(/shadow_ledger_slot_index_matches_day/);
+    await expect(client.exec(slot("other", 20721 % 91, 20721, "1"))).rejects.toThrow(/shadow_ledger_slot_ring_valid/);
+    await expect(client.exec(slot("wallet", 20721 % 91, 20721, "-1"))).rejects.toThrow(/shadow_ledger_slot_amount_range/);
+    await expect(client.exec(slot("wallet", 20721 % 91, 20721, (1n << 224n).toString()))).rejects.toThrow(/shadow_ledger_slot_amount_range/);
+    await expect(client.exec(slot("wallet", 20721 % 91, 20721, "1", "advisory-public"))).rejects.toThrow(/shadow_ledger_slot_scope_valid/);
+    await client.exec(slot(`cp:${CP}`, 20721 % 91, 20721, ((1n << 224n) - 1n).toString()));
+    await expect(
+      client.exec(`INSERT INTO shadow_ledger_counterparty (scope, counterparty, "limit", pinned) VALUES ('${SCOPE}', '${CP}', 5, true)`),
+    ).rejects.toThrow(/shadow_ledger_counterparty_pinned_limit_zero/);
   });
 });

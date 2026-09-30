@@ -2,7 +2,7 @@
   "name": "@horos/sdk",
   "version": "0.0.0",
   "private": true,
-  "description": "typed client, Check signing, deploy helper (placeholder)",
+  "description": "typed Horos client: signed check(), read-only records",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
@@ -18,9 +18,11 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "artifact:generate": "node scripts/gen-artifact.mjs"
   },
   "dependencies": {
-    "@horos/schema": "workspace:*"
+    "@horos/schema": "workspace:*",
+    "viem": "2.56.9"
   }
 }

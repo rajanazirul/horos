@@ -1,10 +1,9 @@
 // Boot smoke for the api entry point: env failures exit 1 without values; a valid env serves every route on a real
-// socket, with `/healthz` pinging the database (PGlite here) and a fake chain reader.
+// socket, with `/healthz` pinging the database (the test Postgres here) and a fake chain reader.
 import { randomBytes } from "node:crypto";
-import { PGlite } from "@electric-sql/pglite";
-import { bundledMigrationCount, createLogger, runMigrations, type HorosDb } from "@horos/adapters";
+import { emptyDb, freshDb, type TestClient } from "@horos/adapters/testing";
+import { bundledMigrationCount, createLogger } from "@horos/adapters";
 import { STANDARD_PRESET, toOffchainPolicy, type ChainReader } from "@horos/core";
-import { drizzle } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, test } from "vitest";
 import { parseApiEnv, type ApiEnv } from "./env.js";
 import { listen, main, startApi, type RunningApi } from "./server.js";
@@ -31,13 +30,10 @@ function validEnv(extra: Record<string, string> = {}): ApiEnv {
 }
 
 const running: RunningApi[] = [];
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (running.length) await running.pop()?.close();
-  while (clients.length) {
-    const c = clients.pop();
-    if (c !== undefined && !c.closed) await c.close();
-  }
+  while (clients.length) await clients.pop()?.close();
 });
 
 describe("main: environment failures", () => {
@@ -67,10 +63,8 @@ describe("main: environment failures", () => {
 
 describe("startApi: boot smoke", () => {
   async function boot(extra: Record<string, string> = {}) {
-    const client = new PGlite();
+    const { client, db } = await freshDb();
     clients.push(client);
-    const db = drizzle(client) as unknown as HorosDb;
-    await runMigrations(db);
     const lines: string[] = [];
     const api = await startApi(validEnv({ PUBLIC_DEMO_SCOPE: "enforced:01926f3a-7b2c-7d4e-9a11-3b4c5d6e7f80", ...extra }), {
       db,
@@ -103,6 +97,34 @@ describe("startApi: boot smoke", () => {
     expect(out).not.toContain("not-a-real-password");
   });
 
+  test("mounts Shadow Mode: admin sign-up, an API-key Check, API-key reads and the summary (key never logged)", async () => {
+    const { url, lines } = await boot();
+    const json = { "content-type": "application/json" };
+    const signup = await fetch(url("/v1/shadow"), {
+      method: "POST",
+      headers: { ...json, authorization: `Bearer ${ENV.ADMIN_TOKEN}` },
+      body: JSON.stringify({ payment_address: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8" }),
+    });
+    expect(signup.status).toBe(200);
+    expect(signup.headers.get("cache-control")).toBe("no-store");
+    const { scope, apiKey } = (await signup.json()) as { scope: string; apiKey: string };
+    const key = { "x-horos-api-key": apiKey };
+    // The chain is down in this boot: hasCode fails, so the first contact holds (conservatively) and nothing is written on-chain.
+    const check = await fetch(url("/v1/shadow/check"), {
+      method: "POST",
+      headers: { ...json, ...key },
+      body: JSON.stringify({ counterparty: "0x1111111111111111111111111111111111111111", amount: "1000000" }),
+    });
+    expect(check.status).toBe(200);
+    expect(await check.json()).toMatchObject({ decision: "hold", advisory: true, limit_write: "none" });
+    const records = await fetch(url(`/v1/scopes/${scope}/records`), { headers: key });
+    expect(records.status).toBe(200);
+    expect(((await records.json()) as { records: unknown[] }).records).toHaveLength(1);
+    const summary = await fetch(url(`/v1/scopes/${scope}/shadow-summary`), { headers: key });
+    expect(await summary.json()).toEqual({ advisory: 0, would_have_caught: 1 });
+    expect(lines.join("\n")).not.toContain(apiKey);
+  });
+
   test("/healthz answers 503 when the database is unreachable", async () => {
     const { url, client } = await boot();
     await client.close();
@@ -129,10 +151,8 @@ describe("startApi: boot smoke", () => {
 
 describe("startApi: health, shutdown and binding", () => {
   async function bootDb(migrate: boolean) {
-    const client = new PGlite();
+    const { client, db } = await (migrate ? freshDb() : emptyDb());
     clients.push(client);
-    const db = drizzle(client) as unknown as HorosDb;
-    if (migrate) await runMigrations(db);
     const api = await startApi(validEnv(), { db, chainReader: unusedChain, log: createLogger({ service: "api", write: () => {} }), port: 0 });
     running.push(api);
     return { api, client, url: (p: string) => `http://127.0.0.1:${api.port}${p}` };
@@ -214,10 +234,8 @@ describe("startApi: the Check rate limit keys", () => {
     });
 
   async function bootLimited() {
-    const client = new PGlite();
+    const { client, db } = await freshDb();
     clients.push(client);
-    const db = drizzle(client) as unknown as HorosDb;
-    await runMigrations(db);
     const api = await startApi(validEnv({ CHECK_RATE_PER_MINUTE: "1", TRUSTED_PROXY_HOPS: "1" }), {
       db,
       chainReader: unusedChain,

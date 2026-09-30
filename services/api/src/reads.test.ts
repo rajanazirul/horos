@@ -1,4 +1,4 @@
-import { PGlite } from "@electric-sql/pglite";
+import { emptyDb, freshDb, type TestClient } from "@horos/adapters/testing";
 import {
   PostgresAccountStore,
   PostgresIndexerStore,
@@ -6,9 +6,7 @@ import {
   PostgresPolicyVersionStore,
   PostgresReadStore,
   PostgresRecordStore,
-  runMigrations,
   upsertIntent,
-  type HorosDb,
 } from "@horos/adapters";
 import { buildExternalRecord, type ChainReader, type ChainView, type ProvisionedKeys, type WalletRoles } from "@horos/core";
 import {
@@ -27,7 +25,6 @@ import {
   type Hex,
   type Scope,
 } from "@horos/schema";
-import { drizzle } from "drizzle-orm/pglite";
 import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
 import { createApp } from "./app.js";
@@ -104,7 +101,7 @@ class FakeReader implements ChainReader {
   }
 }
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
@@ -141,10 +138,8 @@ function decisionRecord(scope: Scope, customerId: string, counterparty: Hex, dec
 }
 
 async function setup(opts: { publicDemo?: boolean; noResolver?: boolean } = {}) {
-  const client = new PGlite();
+  const { client, db } = await freshDb();
   clients.push(client);
-  const db = drizzle(client) as unknown as HorosDb;
-  await runMigrations(db);
   const accounts = new PostgresAccountStore(db);
   const { binding } = await accounts.onboard({ paymentAddress: PAY, webhookUrl: "", now: NOW });
   await accounts.setKeys(binding.customerId, KEYS, NOW);
@@ -464,9 +459,8 @@ describe("access", () => {
   });
 
   test("an invalid publicDemoScope fails createApp", async () => {
-    const client = new PGlite();
+    const { client, db } = await emptyDb();
     clients.push(client);
-    const db = drizzle(client) as unknown as HorosDb;
     expect(() =>
       createApp({ policyVersions: new PostgresPolicyVersionStore(db), adminToken: TOKEN, now: () => NOW, newId: () => uuidv7(), reads: new PostgresReadStore(db), publicDemoScope: "enforced:typo" }),
     ).toThrow(/publicDemoScope/);
@@ -506,10 +500,8 @@ describe("read-only", () => {
   });
 
   test("without `reads` the routes are not mounted", async () => {
-    const client = new PGlite();
+    const { client, db } = await freshDb();
     clients.push(client);
-    const db = drizzle(client) as unknown as HorosDb;
-    await runMigrations(db);
     const app = createApp({ policyVersions: new PostgresPolicyVersionStore(db), adminToken: TOKEN, now: () => NOW, newId: () => uuidv7() });
     expect((await app.request(path("advisory-public", "records"))).status).toBe(404);
   });

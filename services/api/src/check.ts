@@ -12,13 +12,14 @@ import {
   PostgresOutboxStore,
   PostgresPolicyVersionStore,
   PostgresRecordStore,
+  PostgresShadowStore,
   recoverCheckSigner,
   uuidv7,
   type HorosDb,
   type HorosTx,
 } from "@horos/adapters";
 import type { ChainReader, ListSnapshot } from "@horos/core";
-import { runCheck, type CheckDeps, type CheckPrincipal } from "@horos/pipeline";
+import { runCheck, type CheckDeps, type CheckPrincipal, type VirtualLedger } from "@horos/pipeline";
 import { CheckRequest } from "@horos/schema";
 import type { Context, Hono } from "hono";
 import { describeIssues, fail } from "./http.js";
@@ -73,7 +74,7 @@ export function registerCheckRoute(app: Hono, deps: CheckRouteDeps): void {
 
     const ip = clientIp(c, deps.trustedProxyHops ?? 0, deps.remoteAddress);
     const admit = (p: CheckPrincipal): boolean =>
-      limiter.take(p.kind === "customer" ? `customer:${p.customerId}` : `ip:${ip}`, deps.now().getTime());
+      limiter.take(p.kind === "advisory" ? `ip:${ip}` : `${p.kind}:${p.customerId}`, deps.now().getTime());
     const outcome = await runCheck(parsed.data, deps.check, { admit });
     if (outcome.kind === "rate_limited") {
       log({ event: "check-rate-limited", principal: outcome.principal.kind });
@@ -95,6 +96,8 @@ export interface PostgresCheckDepsOptions {
   readonly lists?: () => Promise<readonly ListSnapshot[]>;
   readonly limitWriteWaitMs?: number;
   readonly log?: (entry: Record<string, unknown>) => void;
+  /** The shadow virtual ledger (Story 3.4). Default: a `PostgresShadowStore` on `db`. Only shadow Checks use it. */
+  readonly ledger?: VirtualLedger<HorosTx>;
 }
 
 /** Wire the pipeline's Check ports to the Postgres and viem adapters. */
@@ -135,5 +138,6 @@ export function postgresCheckDeps(db: HorosDb, opts: PostgresCheckDepsOptions): 
     sleep: opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     ...(opts.limitWriteWaitMs === undefined ? {} : { limitWriteWaitMs: opts.limitWriteWaitMs }),
     ...(opts.log === undefined ? {} : { log: opts.log }),
+    ledger: opts.ledger ?? new PostgresShadowStore(db, { newId: idAt }),
   };
 }

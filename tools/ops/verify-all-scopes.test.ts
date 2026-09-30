@@ -1,19 +1,16 @@
-import { PGlite } from "@electric-sql/pglite";
-import type { HorosDb } from "@horos/adapters";
-import { drizzle } from "drizzle-orm/pglite";
+import { emptyDb, type TestClient } from "@horos/adapters/testing";
 import { afterEach, describe, expect, test } from "vitest";
 import { DRILL_CUSTOMER, DRILL_ENFORCED, DRILL_SHADOW, seedDrillScopes, tamperRecord } from "./seed.ts";
 import { checkMigrations, formatResult, verifyAllScopes } from "./verify-all-scopes.ts";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
 
 async function seeded() {
-  const client = new PGlite();
+  const { client, db } = await emptyDb();
   clients.push(client);
-  const db = drizzle(client) as unknown as HorosDb;
   await seedDrillScopes(db);
   return db;
 }

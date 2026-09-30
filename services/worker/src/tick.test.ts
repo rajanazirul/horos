@@ -1,4 +1,4 @@
-import type { PGlite } from "@electric-sql/pglite";
+import { freshDb, type TestClient } from "@horos/adapters/testing";
 import {
   PostgresJobStore,
   PostgresListStore,
@@ -10,10 +10,8 @@ import {
   type SdnFetchResult,
 } from "@horos/adapters";
 import { STANDARD_PRESET, evaluate, isSimulated, type FounderAlert, type Notifier } from "@horos/core";
-import { drizzle } from "drizzle-orm/pglite";
-import { migratedClient, migratedDump } from "./migrated-db.test-helpers.js";
 import { readFileSync } from "node:fs";
-import { afterEach, beforeAll, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { createWorker, ofacWindow, OFAC_POLL_JOB } from "./tick.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../../../fixtures/ofac/${name}`, import.meta.url), "utf8");
@@ -27,12 +25,7 @@ const T0 = new Date("2026-09-26T10:05:00.000Z");
 const HOUR = 60 * 60 * 1000;
 const at = (h: number, extraMs = 0) => new Date(T0.getTime() + h * HOUR + extraMs);
 
-// Migrate once for the file, outside any single test's timeout.
-beforeAll(async () => {
-  await migratedDump();
-});
-
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });
@@ -66,9 +59,8 @@ function scripted(...responses: (SdnFetchResult | Error)[]) {
 const ok = (body: string, lastModified = "Fri, 25 Sep 2026 12:00:00 GMT"): SdnFetchResult => ({ status: 200, body, lastModified });
 
 async function setup(fetchSdn: FetchSdn, notifier: Notifier = new RecordingNotifier()) {
-  const client = await migratedClient();
+  const { client, db } = await freshDb();
   clients.push(client);
-  const db = drizzle(client);
   const lists = new PostgresListStore(db);
   const jobs = new PostgresJobStore(db);
   const worker = createWorker({ jobs, lists, fetchSdn, notifier, newId: () => uuidv7() });
@@ -79,7 +71,7 @@ describe("tick / runOfacPoll", () => {
   test("first fetch: every EVM address active, lowercased; freshness and Last-Modified set", async () => {
     const f = scripted(ok(SAMPLE));
     const { worker, lists, jobs } = await setup(f.fetchSdn);
-    const r = await worker.tick(T0);
+    const r = await worker.fullTick(T0);
     expect(r).toMatchObject({ ran: true, outcome: { kind: "activated", addressCount: 10 } });
     expect(f.seen).toEqual([undefined]);
     const active = await lists.activeSnapshot("ofac-sdn");
@@ -94,9 +86,9 @@ describe("tick / runOfacPoll", () => {
   test("304: only last_verified_at changes, If-Modified-Since is sent", async () => {
     const f = scripted(ok(SAMPLE), { status: 304 });
     const { worker, lists } = await setup(f.fetchSdn);
-    await worker.tick(T0);
+    await worker.fullTick(T0);
     const before = await lists.activeSnapshot("ofac-sdn");
-    expect(await worker.tick(at(1))).toMatchObject({ outcome: { kind: "not-modified" } });
+    expect(await worker.fullTick(at(1))).toMatchObject({ outcome: { kind: "not-modified" } });
     expect(f.seen[1]).toBe("Fri, 25 Sep 2026 12:00:00 GMT");
     expect(await lists.snapshotsOf("ofac-sdn")).toHaveLength(1);
     expect(await lists.sourceState("ofac-sdn")).toMatchObject({
@@ -113,8 +105,8 @@ describe("tick / runOfacPoll", () => {
     expect(withoutEof).not.toContain("\u001a");
     const f = scripted(ok(SAMPLE), ok(withoutEof, "Sat, 26 Sep 2026 12:00:00 GMT"));
     const { worker, lists } = await setup(f.fetchSdn);
-    await worker.tick(T0);
-    expect(await worker.tick(at(1))).toMatchObject({ outcome: { kind: "unchanged" } });
+    await worker.fullTick(T0);
+    expect(await worker.fullTick(at(1))).toMatchObject({ outcome: { kind: "unchanged" } });
     expect(await lists.snapshotsOf("ofac-sdn")).toHaveLength(1);
     expect(await lists.sourceState("ofac-sdn")).toMatchObject({ lastVerifiedAt: at(1), lastModified: "Sat, 26 Sep 2026 12:00:00 GMT" });
   });
@@ -125,9 +117,9 @@ describe("tick / runOfacPoll", () => {
     const f = scripted(ok(SAMPLE), ok(oneRemoved));
     const notifier = new RecordingNotifier();
     const { worker, lists } = await setup(f.fetchSdn, notifier);
-    await worker.tick(T0);
+    await worker.fullTick(T0);
     const first = await lists.activeSnapshot("ofac-sdn");
-    expect(await worker.tick(at(1))).toMatchObject({ outcome: { kind: "activated", addressCount: 9 } });
+    expect(await worker.fullTick(at(1))).toMatchObject({ outcome: { kind: "activated", addressCount: 9 } });
     const now = await lists.activeSnapshot("ofac-sdn");
     expect(now?.id).not.toBe(first?.id);
     expect(now?.entries.some((e) => e.address === A8)).toBe(false);
@@ -138,9 +130,9 @@ describe("tick / runOfacPoll", () => {
     const f = scripted(ok(SAMPLE), ok(SAMPLE_30, "Sat, 26 Sep 2026 12:00:00 GMT"));
     const notifier = new RecordingNotifier();
     const { worker, lists } = await setup(f.fetchSdn, notifier);
-    await worker.tick(T0);
+    await worker.fullTick(T0);
     const first = await lists.activeSnapshot("ofac-sdn");
-    const r = await worker.tick(at(1));
+    const r = await worker.fullTick(at(1));
     expect(r).toMatchObject({ outcome: { kind: "quarantined", removed: 3, total: 10, alerted: true } });
     expect((await lists.activeSnapshot("ofac-sdn"))?.id).toBe(first?.id);
     expect((await lists.snapshotsOf("ofac-sdn")).map((s) => s.status)).toEqual(["active", "quarantined"]);
@@ -162,9 +154,9 @@ describe("tick / runOfacPoll", () => {
     const f = scripted(ok(SAMPLE), ok(withAddition, "Sat, 26 Sep 2026 12:00:00 GMT"));
     const notifier = new RecordingNotifier();
     const { worker, lists } = await setup(f.fetchSdn, notifier);
-    await worker.tick(T0);
+    await worker.fullTick(T0);
     const first = await lists.activeSnapshot("ofac-sdn");
-    const r = await worker.tick(at(1));
+    const r = await worker.fullTick(at(1));
     expect(r).toMatchObject({ outcome: { kind: "quarantined", removed: 3, total: 10, added: 1, alerted: true } });
     const active = await lists.activeSnapshot("ofac-sdn");
     expect(active?.id).not.toBe(first?.id);
@@ -197,9 +189,9 @@ describe("tick / runOfacPoll", () => {
     const f = scripted(ok(SAMPLE), ok(SAMPLE_30, "Sat, 26 Sep 2026 12:00:00 GMT"), ok(SAMPLE_30, "Sat, 26 Sep 2026 12:00:00 GMT"));
     const notifier = new RecordingNotifier();
     const { worker, lists } = await setup(f.fetchSdn, notifier);
-    await worker.tick(T0);
-    await worker.tick(at(1));
-    const r = await worker.tick(at(2));
+    await worker.fullTick(T0);
+    await worker.fullTick(at(1));
+    const r = await worker.fullTick(at(2));
     expect(f.seen[2]).toBe("Fri, 25 Sep 2026 12:00:00 GMT");
     expect(r).toMatchObject({ outcome: { kind: "quarantined", alerted: false } });
     expect(notifier.alerts).toHaveLength(1);
@@ -211,11 +203,11 @@ describe("tick / runOfacPoll", () => {
     const f = scripted(ok(SAMPLE), ok(SAMPLE_30), ok(SAMPLE_30), ok(SAMPLE_30));
     const notifier = new RecordingNotifier(1);
     const { worker, lists } = await setup(f.fetchSdn, notifier);
-    await worker.tick(T0);
-    expect(await worker.tick(at(1))).toMatchObject({ outcome: { kind: "quarantined", alerted: false, alertError: "Error: webhook down" } });
+    await worker.fullTick(T0);
+    expect(await worker.fullTick(at(1))).toMatchObject({ outcome: { kind: "quarantined", alerted: false, alertError: "Error: webhook down" } });
     expect((await lists.sourceState("ofac-sdn"))?.quarantineAlertedHash).toBeNull();
-    expect(await worker.tick(at(2))).toMatchObject({ outcome: { kind: "quarantined", alerted: true } });
-    expect(await worker.tick(at(3))).toMatchObject({ outcome: { kind: "quarantined", alerted: false } });
+    expect(await worker.fullTick(at(2))).toMatchObject({ outcome: { kind: "quarantined", alerted: true } });
+    expect(await worker.fullTick(at(3))).toMatchObject({ outcome: { kind: "quarantined", alerted: false } });
     expect(notifier.alerts).toHaveLength(2);
     expect(await lists.snapshotsOf("ofac-sdn")).toHaveLength(2);
   });
@@ -223,8 +215,8 @@ describe("tick / runOfacPoll", () => {
   test("big removal with a failing alert: recorded on the job, not thrown", async () => {
     const f = scripted(ok(SAMPLE), ok(SAMPLE_30));
     const { worker, jobs, lists } = await setup(f.fetchSdn, new RecordingNotifier(Infinity));
-    await worker.tick(T0);
-    const r = await worker.tick(at(1));
+    await worker.fullTick(T0);
+    const r = await worker.fullTick(at(1));
     expect(r).toMatchObject({ ran: true, outcome: { kind: "quarantined", alertError: "Error: webhook down" } });
     expect(await jobs.get(OFAC_POLL_JOB, ofacWindow(at(1)))).toMatchObject({
       status: "done",
@@ -239,8 +231,8 @@ describe("tick / runOfacPoll", () => {
   ])("fetch failure (%s): nothing bumped, job failed with the error", async (_name, failure) => {
     const f = scripted(ok(SAMPLE), failure);
     const { worker, lists, jobs } = await setup(f.fetchSdn);
-    await worker.tick(T0);
-    const r = await worker.tick(at(1));
+    await worker.fullTick(T0);
+    const r = await worker.fullTick(at(1));
     expect(r).toMatchObject({ ran: true });
     expect("error" in r && r.error).toMatch(/fetch/i);
     expect(await lists.sourceState("ofac-sdn")).toMatchObject({ lastVerifiedAt: T0, lastModified: "Fri, 25 Sep 2026 12:00:00 GMT" });
@@ -253,8 +245,8 @@ describe("tick / runOfacPoll", () => {
   test("empty parse while the active snapshot has addresses: a failure, no bump", async () => {
     const f = scripted(ok(SAMPLE), ok('1,"NOBODY","-0- ","P","-0- ","-0- ","-0- ","-0- ","-0- ","-0- ","-0- ","-0- "\n'));
     const { worker, lists, jobs } = await setup(f.fetchSdn);
-    await worker.tick(T0);
-    const r = await worker.tick(at(1));
+    await worker.fullTick(T0);
+    const r = await worker.fullTick(at(1));
     expect("error" in r && r.error).toMatch(/0 EVM addresses/);
     expect((await lists.sourceState("ofac-sdn"))?.lastVerifiedAt).toEqual(T0);
     expect(await lists.snapshotsOf("ofac-sdn")).toHaveLength(1);
@@ -264,7 +256,7 @@ describe("tick / runOfacPoll", () => {
   test("empty parse on the very first poll: a failure, nothing activated, SDN stays absent (stale)", async () => {
     const f = scripted(ok('1,"NOBODY","-0- ","P","-0- ","-0- ","-0- ","-0- ","-0- ","-0- ","-0- ","-0- "\n'));
     const { worker, lists, jobs } = await setup(f.fetchSdn);
-    const r = await worker.tick(T0);
+    const r = await worker.fullTick(T0);
     expect("error" in r && r.error).toMatch(/0 EVM addresses/);
     expect(await lists.sourceState("ofac-sdn")).toBeUndefined();
     expect(await loadActiveListSnapshots(lists)).toEqual([]);
@@ -274,7 +266,7 @@ describe("tick / runOfacPoll", () => {
   test("a malformed CSV is a failure", async () => {
     const f = scripted(ok('1,"unterminated'));
     const { worker, lists } = await setup(f.fetchSdn);
-    const r = await worker.tick(T0);
+    const r = await worker.fullTick(T0);
     expect("error" in r && r.error).toMatch(/parse failed/);
     expect(await lists.sourceState("ofac-sdn")).toBeUndefined();
   });
@@ -282,10 +274,10 @@ describe("tick / runOfacPoll", () => {
   test("tick twice in the same hour runs the poll once; the next hour runs again", async () => {
     const f = scripted(ok(SAMPLE), { status: 304 });
     const { worker } = await setup(f.fetchSdn);
-    expect(await worker.tick(T0)).toMatchObject({ ran: true });
-    expect(await worker.tick(at(0, 30 * 60 * 1000))).toEqual({ job: OFAC_POLL_JOB, window: "2026-09-26T10", ran: false });
+    expect(await worker.fullTick(T0)).toMatchObject({ ran: true });
+    expect(await worker.fullTick(at(0, 30 * 60 * 1000))).toEqual({ job: OFAC_POLL_JOB, window: "2026-09-26T10", ran: false });
     expect(f.seen).toHaveLength(1);
-    expect(await worker.tick(at(1))).toMatchObject({ ran: true, window: "2026-09-26T11" });
+    expect(await worker.fullTick(at(1))).toMatchObject({ ran: true, window: "2026-09-26T11" });
     expect(f.seen).toHaveLength(2);
   });
 
@@ -324,7 +316,7 @@ describe("end to end through the loader and core evaluate", () => {
   test("stale: last_verified_at 25h ago → hold 'sanctions list stale' on first contact", async () => {
     const f = scripted(ok(SAMPLE));
     const { worker, lists } = await setup(f.fetchSdn);
-    await worker.tick(T0);
+    await worker.fullTick(T0);
     const e = input(PAYEE, await loadActiveListSnapshots(lists), at(25));
     expect(e.decision).toBe("hold");
     expect(e.decisiveRule).toBe("sanctions-list-stale");
@@ -336,7 +328,7 @@ describe("end to end through the loader and core evaluate", () => {
   test("an SDN match blocks and is not simulated", async () => {
     const f = scripted(ok(SAMPLE));
     const { worker, lists } = await setup(f.fetchSdn);
-    await worker.tick(T0);
+    await worker.fullTick(T0);
     const e = input(SHARED.toUpperCase().replace("0X", "0x"), await loadActiveListSnapshots(lists), at(1));
     expect(e.decision).toBe("block");
     expect(isSimulated(e)).toBe(false);
@@ -349,7 +341,7 @@ describe("end to end through the loader and core evaluate", () => {
   test("Demo match: block, isSimulated true, the SDN snapshot is not involved", async () => {
     const f = scripted(ok(SAMPLE));
     const { worker, lists } = await setup(f.fetchSdn);
-    await worker.tick(T0);
+    await worker.fullTick(T0);
     await loadDemoList(lists, { now: T0, newId: () => uuidv7() });
     const demoAddr = (await readDemoList()).entries[0]?.address ?? "";
     const e = input(demoAddr, await loadActiveListSnapshots(lists), at(1));

@@ -1,12 +1,11 @@
-import type { PGlite } from "@electric-sql/pglite";
 import type { ProvisionedKeys } from "@horos/core";
 import type { Hex } from "@horos/schema";
 import { afterEach, describe, expect, test } from "vitest";
 import { BindingConflictError, PostgresAccountStore, PROVISION_KEYS_JOB } from "./account-store.js";
 import { PostgresJobStore } from "./job-store.js";
-import { freshDb } from "./test-db.js";
+import { freshDb, type TestClient } from "./test-db.js";
 
-const clients: PGlite[] = [];
+const clients: TestClient[] = [];
 afterEach(async () => {
   while (clients.length) await clients.pop()?.close();
 });

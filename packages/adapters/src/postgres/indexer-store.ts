@@ -3,7 +3,7 @@
 // of them. Every write is idempotent, so re-indexing a chunk after a crash changes nothing.
 import type { OutboxIntentRow } from "@horos/core";
 import { Address, Bytes32, ExternalRecord, Scope, type Hex } from "@horos/schema";
-import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { uuidv7 } from "../ids.js";
 import type { HorosDb } from "./db.js";
 import { outboxRowFrom } from "./outbox-store.js";
@@ -208,6 +208,17 @@ export class PostgresIndexerStore {
       .select({ scope: enforcedBinding.scopeId, customerId: enforcedBinding.customerId, policyWallet: enforcedBinding.policyWallet })
       .from(enforcedBinding)
       .where(and(eq(enforcedBinding.status, "bound"), isNotNull(enforcedBinding.policyWallet)))
+      .orderBy(asc(enforcedBinding.customerId));
+    return rows.map((r) => ({ scope: Scope.parse(r.scope), customerId: r.customerId, policyWallet: Address.parse(r.policyWallet) }));
+  }
+
+  /** The bound wallets with at least one outbox intent in flight (`sending` or `submitted`): the fast lane's subset (AD-20). */
+  async walletsWithSubmittedIntents(): Promise<BoundWallet[]> {
+    const rows = await this.db
+      .selectDistinct({ scope: enforcedBinding.scopeId, customerId: enforcedBinding.customerId, policyWallet: enforcedBinding.policyWallet })
+      .from(enforcedBinding)
+      .innerJoin(outboxIntent, eq(outboxIntent.scope, enforcedBinding.scopeId))
+      .where(and(eq(enforcedBinding.status, "bound"), isNotNull(enforcedBinding.policyWallet), inArray(outboxIntent.status, ["sending", "submitted"])))
       .orderBy(asc(enforcedBinding.customerId));
     return rows.map((r) => ({ scope: Scope.parse(r.scope), customerId: r.customerId, policyWallet: Address.parse(r.policyWallet) }));
   }

@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
     }
   },
   "files": [
@@ -33,7 +37,6 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.8",
     "@horos/verify": "workspace:*",
     "@types/pg": "8.23.1",
     "drizzle-kit": "0.31.11"
